@@ -1,0 +1,39 @@
+[package]
+name = "ason"
+version = "0.1.0"
+authors = ["Athan Xiao <athanxiao@gmail.com>"]
+edition = "2024"
+description = "ASON (Array-Schema Object Notation) - A high-performance, token-efficient serde data format with schema-data separation"
+license = "MIT"
+repository = "https://github.com/athxx/ason"
+readme = "README.md"
+documentation = "https://docs.rs/ason"
+homepage = "https://github.com/athxx/ason"
+keywords = ["ason", "serialization", "serde", "token-efficient", "schema"]
+categories = ["encoding", "parser-implementations"]
+rust-version = "1.85"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+ryu = "1"
+fast-float2 = "0.2"
+
+[dev-dependencies]
+serde_json = "1"
+libc = "0.2"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "complex"
+path = "examples/complex.rs"
+
+[[example]]
+name = "bench"
+path = "examples/bench.rs"
+
+[[example]]
+name = "cross_compat"
+path = "examples/cross_compat.rs"
