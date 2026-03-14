@@ -6,9 +6,29 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 type CachedSchemaSpans = Arc<[(u32, u32)]>;
+type MissingFields = Arc<[&'static str]>;
 
 fn schema_cache() -> &'static Mutex<HashMap<Vec<u8>, CachedSchemaSpans>> {
     static CACHE: OnceLock<Mutex<HashMap<Vec<u8>, CachedSchemaSpans>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+struct StructModeCacheKey {
+    source_ptr: usize,
+    source_len: usize,
+    target_ptr: usize,
+    target_len: usize,
+}
+
+#[derive(Clone)]
+enum CachedStructPlan {
+    Exact,
+    WithDefaults(MissingFields),
+}
+
+fn struct_mode_cache() -> &'static Mutex<HashMap<StructModeCacheKey, CachedStructPlan>> {
+    static CACHE: OnceLock<Mutex<HashMap<StructModeCacheKey, CachedStructPlan>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -26,6 +46,8 @@ pub struct Deserializer<'de> {
     /// Cache the last resolved field alignment for repeated rows using the
     /// same source schema and target field list.
     last_struct_mode: Option<CachedStructMode>,
+    /// Per-decode cache for repeated nested struct/source-schema alignments.
+    struct_mode_cache_local: HashMap<StructModeCacheKey, CachedStructPlan>,
 }
 
 pub fn decode<'a, T: Deserialize<'a>>(s: &'a str) -> Result<T> {
@@ -36,6 +58,7 @@ pub fn decode<'a, T: Deserialize<'a>>(s: &'a str) -> Result<T> {
         field_index: 0,
         vec_schema_active: false,
         last_struct_mode: None,
+        struct_mode_cache_local: HashMap::new(),
     };
     de.skip_whitespace_and_comments();
     let value = T::deserialize(&mut de)?;
@@ -283,20 +306,7 @@ impl<'de> Deserializer<'de> {
         match self.input[self.pos] {
             b'(' => self.skip_balanced(b'(', b')'),
             b'[' => self.skip_balanced(b'[', b']'),
-            b'"' => {
-                self.pos += 1;
-                while self.pos < self.input.len() {
-                    match self.input[self.pos] {
-                        b'\\' => self.pos += 2,
-                        b'"' => {
-                            self.pos += 1;
-                            return Ok(());
-                        }
-                        _ => self.pos += 1,
-                    }
-                }
-                Err(Error::Eof)
-            }
+            b'"' => self.skip_quoted_string(),
             _ => {
                 while self.pos < self.input.len() {
                     match self.input[self.pos] {
@@ -330,21 +340,22 @@ impl<'de> Deserializer<'de> {
     }
 
     /// Parse a plain (unquoted) string value, stopping at delimiters.
-    /// Scalar loop — plain values are typically short (< 16 bytes),
-    /// so SIMD overhead is not beneficial here.
     /// Returns zerocopy borrowed str.
     #[inline]
     fn parse_plain_value_meta(&mut self) -> Result<(&'de str, bool)> {
         let start = self.pos;
         let mut has_escape = false;
         while self.pos < self.input.len() {
-            match self.input[self.pos] {
-                b',' | b')' | b']' | b':' => break,
-                b'\\' => {
-                    has_escape = true;
-                    self.pos += 2;
-                }
-                _ => self.pos += 1,
+            let hit = simd::simd_find_plain_delimiter(self.input, self.pos);
+            self.pos = hit;
+            if self.pos >= self.input.len() {
+                break;
+            }
+            if self.input[self.pos] == b'\\' {
+                has_escape = true;
+                self.pos += 2;
+            } else {
+                break;
             }
         }
         let mut end = self.pos;
@@ -436,6 +447,29 @@ impl<'de> Deserializer<'de> {
                     result.push(b as char);
                     self.pos += 1;
                 }
+            }
+        }
+    }
+
+    #[inline]
+    fn skip_quoted_string(&mut self) -> Result<()> {
+        self.pos += 1;
+        loop {
+            if self.pos >= self.input.len() {
+                return Err(Error::Eof);
+            }
+            let hit = simd::simd_find_quote_or_backslash(self.input, self.pos);
+            if hit >= self.input.len() {
+                return Err(Error::Eof);
+            }
+            self.pos = hit;
+            match self.input[self.pos] {
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                b'\\' => self.pos += 2,
+                _ => unreachable!(),
             }
         }
     }
@@ -599,9 +633,15 @@ impl<'de> Deserializer<'de> {
         let source_key = source_fields.cache_key();
         let target_ptr = target_fields.as_ptr() as usize;
         let target_len = target_fields.len();
+        let cache_key = StructModeCacheKey {
+            source_ptr: source_key.ptr,
+            source_len: source_key.len,
+            target_ptr,
+            target_len,
+        };
 
         if let Some(cached) = &self.last_struct_mode {
-            if cached.source_key == source_key
+            if cached.cache_key == cache_key
                 && cached.target_ptr == target_ptr
                 && cached.target_len == target_len
             {
@@ -609,9 +649,54 @@ impl<'de> Deserializer<'de> {
             }
         }
 
+        if let Some(cached) = self.struct_mode_cache_local.get(&cache_key).cloned() {
+            let mode = match cached {
+                CachedStructPlan::Exact => StructMode::Exact,
+                CachedStructPlan::WithDefaults(missing_fields) => {
+                    StructMode::WithDefaults { missing_fields }
+                }
+            };
+            self.last_struct_mode = Some(CachedStructMode {
+                cache_key,
+                target_ptr,
+                target_len,
+                mode: mode.clone(),
+            });
+            return mode;
+        }
+
+        if let Some(cached) = struct_mode_cache().lock().unwrap().get(&cache_key).cloned() {
+            let mode = match &cached {
+                CachedStructPlan::Exact => StructMode::Exact,
+                CachedStructPlan::WithDefaults(missing_fields) => StructMode::WithDefaults {
+                    missing_fields: missing_fields.clone(),
+                },
+            };
+            self.struct_mode_cache_local.insert(cache_key, cached);
+            self.last_struct_mode = Some(CachedStructMode {
+                cache_key,
+                target_ptr,
+                target_len,
+                mode: mode.clone(),
+            });
+            return mode;
+        }
+
         let mode = self.struct_mode(target_fields);
+        let cached = match &mode {
+            StructMode::Exact => CachedStructPlan::Exact,
+            StructMode::WithDefaults { missing_fields } => {
+                CachedStructPlan::WithDefaults(missing_fields.clone())
+            }
+        };
+        self.struct_mode_cache_local
+            .insert(cache_key, cached.clone());
+        struct_mode_cache()
+            .lock()
+            .unwrap()
+            .insert(cache_key, cached);
         self.last_struct_mode = Some(CachedStructMode {
-            source_key,
+            cache_key,
             target_ptr,
             target_len,
             mode: mode.clone(),
@@ -636,7 +721,7 @@ struct SchemaFieldsKey {
 }
 
 struct CachedStructMode {
-    source_key: SchemaFieldsKey,
+    cache_key: StructModeCacheKey,
     target_ptr: usize,
     target_len: usize,
     mode: StructMode,
@@ -700,20 +785,20 @@ impl<'de> SchemaFields<'de> {
     }
 
     #[inline]
-    fn missing_target_fields(&self, target_fields: &'static [&'static str]) -> Box<[&'static str]> {
+    fn missing_target_fields(&self, target_fields: &'static [&'static str]) -> MissingFields {
         target_fields
             .iter()
             .copied()
             .filter(|target| !self.contains_name(target))
             .collect::<Vec<_>>()
-            .into_boxed_slice()
+            .into()
     }
 }
 
 #[derive(Clone)]
 enum StructMode {
     Exact,
-    WithDefaults { missing_fields: Box<[&'static str]> },
+    WithDefaults { missing_fields: MissingFields },
 }
 
 /// Lightweight Cow-like enum to avoid std::borrow::Cow overhead
@@ -1419,7 +1504,7 @@ struct AsonStructAccessWithDefaults<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     field_index: usize,
     default_index: usize,
-    missing_fields: Box<[&'static str]>,
+    missing_fields: MissingFields,
 }
 
 impl<'a, 'de> MapAccess<'de> for AsonStructAccessWithDefaults<'a, 'de> {

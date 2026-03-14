@@ -369,7 +369,7 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
 }
 
 /// SIMD-accelerated: find first delimiter for plain (unquoted) value parsing.
-/// Delimiters: `,` `)` `]` `\`
+/// Delimiters: `,` `)` `]` `:` `\`
 ///
 /// Returns the offset from `start`, or `len` if none found.
 #[inline]
@@ -381,13 +381,17 @@ pub fn simd_find_plain_delimiter(bytes: &[u8], start: usize) -> usize {
         let v_comma = splat(b',');
         let v_rparen = splat(b')');
         let v_rbracket = splat(b']');
+        let v_colon = splat(b':');
         let v_backslash = splat(b'\\');
 
         while i + LANES <= len {
             let chunk = load(bytes.as_ptr().add(i));
             let mask = movemask(or(
                 or(cmpeq(chunk, v_comma), cmpeq(chunk, v_rparen)),
-                or(cmpeq(chunk, v_rbracket), cmpeq(chunk, v_backslash)),
+                or(
+                    or(cmpeq(chunk, v_rbracket), cmpeq(chunk, v_colon)),
+                    cmpeq(chunk, v_backslash),
+                ),
             ));
             if mask != 0 {
                 return i + first_set_bit(mask) as usize;
@@ -399,7 +403,7 @@ pub fn simd_find_plain_delimiter(bytes: &[u8], start: usize) -> usize {
     // Scalar tail
     while i < len {
         match bytes[i] {
-            b',' | b')' | b']' | b'\\' => return i,
+            b',' | b')' | b']' | b':' | b'\\' => return i,
             _ => i += 1,
         }
     }

@@ -211,6 +211,18 @@ impl Encoder {
         }
         self.first = false;
     }
+
+    #[inline(always)]
+    fn reserve_for_seq(&mut self, len: usize, top_level: bool) {
+        let per_item = if top_level { 64 } else { 24 };
+        self.buf.reserve(len.saturating_mul(per_item) + 8);
+    }
+
+    #[inline(always)]
+    fn reserve_for_struct(&mut self, field_count: usize, top_level: bool) {
+        let per_field = if top_level { 24 } else { 12 };
+        self.buf.reserve(field_count.saturating_mul(per_field) + 8);
+    }
 }
 
 impl<'a> ser::Serializer for &'a mut Encoder {
@@ -394,9 +406,12 @@ impl<'a> ser::Serializer for &'a mut Encoder {
         Ok(())
     }
 
-    fn serialize_seq(self, _len: Option<usize>) -> Result<SeqEncoder<'a>> {
+    fn serialize_seq(self, len: Option<usize>) -> Result<SeqEncoder<'a>> {
         if !self.in_tuple {
             // Top-level seq: Vec<T> — defer format until we know element types
+            if let Some(len) = len {
+                self.reserve_for_seq(len, true);
+            }
             self.in_top_seq = true;
             self.in_tuple = true;
             self.top_seq_data_start = self.buf.len();
@@ -408,6 +423,9 @@ impl<'a> ser::Serializer for &'a mut Encoder {
                 is_top_seq: true,
             })
         } else {
+            if let Some(len) = len {
+                self.reserve_for_seq(len, false);
+            }
             self.push_separator();
             self.buf.push(b'[');
             Ok(SeqEncoder {
@@ -462,6 +480,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<StructEncoder<'a>> {
         let is_top = !self.in_tuple;
         let capture_for_seq = !is_top && self.in_top_seq && self.top_seq_fields.is_none();
+        self.reserve_for_struct(len, is_top);
         if is_top {
             self.buf.push(b'(');
             self.in_tuple = true;
