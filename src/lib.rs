@@ -195,6 +195,20 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_rejects_schema_type_aliases() {
+        for input in [
+            "{id@integer,name@str}:(1,Alice)",
+            "{id@int,name@string}:(1,Alice)",
+            "{score@double}:(3.5)",
+            "{alive@boolean}:(true)",
+            "{tags@[string]}:([Alice])",
+            "{profile@{name@string}}:((Alice))",
+        ] {
+            assert!(decode::<serde_json::Value>(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
     fn test_trailing_comma() {
         let input = "[{id@int,name@str,active@bool}]:(1,Alice,true),(2,Bob,false),";
         let users: Vec<User> = decode(input).unwrap();

@@ -247,22 +247,11 @@ impl<'de> Deserializer<'de> {
             }
             self.skip_whitespace();
 
-            // Skip optional @type hint or nested structural scaffold.
+            // Validate and skip optional @type hint or nested structural scaffold.
             if self.pos < self.input.len() && self.input[self.pos] == b'@' {
                 self.pos += 1;
                 self.skip_whitespace();
-                if self.pos < self.input.len() && self.input[self.pos] == b'{' {
-                    self.skip_balanced(b'{', b'}')?;
-                } else if self.pos < self.input.len() && self.input[self.pos] == b'[' {
-                    self.skip_balanced(b'[', b']')?;
-                } else {
-                    while self.pos < self.input.len() {
-                        match self.input[self.pos] {
-                            b',' | b'}' | b' ' | b'\t' => break,
-                            _ => self.pos += 1,
-                        }
-                    }
-                }
+                self.parse_schema_annotation()?;
             } else if self.pos < self.input.len() && self.input[self.pos] == b':' {
                 return Err(Error::Message(
                     "legacy ':' field annotations are not supported; use '@'".into(),
@@ -279,6 +268,61 @@ impl<'de> Deserializer<'de> {
             names,
             _marker: core::marker::PhantomData,
         })
+    }
+
+    fn parse_schema_annotation(&mut self) -> Result<()> {
+        if self.pos >= self.input.len() {
+            return Err(Error::Message("expected schema type after '@'".into()));
+        }
+        match self.input[self.pos] {
+            b'{' => {
+                let _ = self.parse_schema()?;
+                Ok(())
+            }
+            b'[' => {
+                self.pos += 1;
+                self.skip_whitespace();
+                if self.pos < self.input.len() && self.input[self.pos] == b']' {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                if self.pos < self.input.len() && self.input[self.pos] == b'{' {
+                    let _ = self.parse_schema()?;
+                } else {
+                    self.parse_allowed_schema_scalar_type()?;
+                }
+                self.skip_whitespace();
+                if self.pos >= self.input.len() || self.input[self.pos] != b']' {
+                    return Err(Error::Message("expected ']' in array type annotation".into()));
+                }
+                self.pos += 1;
+                Ok(())
+            }
+            _ => self.parse_allowed_schema_scalar_type(),
+        }
+    }
+
+    fn parse_allowed_schema_scalar_type(&mut self) -> Result<()> {
+        let start = self.pos;
+        while self.pos < self.input.len() {
+            match self.input[self.pos] {
+                b',' | b'}' | b']' | b' ' | b'\t' => break,
+                _ => self.pos += 1,
+            }
+        }
+        if start == self.pos {
+            return Err(Error::Message("expected schema type after '@'".into()));
+        }
+        let mut token = unsafe { core::str::from_utf8_unchecked(&self.input[start..self.pos]) };
+        if let Some(stripped) = token.strip_suffix('?') {
+            token = stripped;
+        }
+        match token {
+            "int" | "str" | "float" | "bool" => Ok(()),
+            _ => Err(Error::Message(format!(
+                "unsupported schema type '{token}'; use int, str, float, or bool"
+            ))),
+        }
     }
 
     #[inline]
