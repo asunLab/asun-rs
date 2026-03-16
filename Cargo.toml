@@ -1,6 +1,6 @@
 [package]
 name = "ason"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["Athan Xiao <athanxiao@gmail.com>"]
 edition = "2024"
 description = "ASON (Array-Schema Object Notation) - A high-performance, token-efficient serde data format with schema-data separation"

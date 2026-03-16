@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ason"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fast-float2",
  "libc",
