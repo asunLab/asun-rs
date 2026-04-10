@@ -29,7 +29,7 @@ ASON 只写一次 Schema，后续每行数据按位置保存：
 
 - 基于 serde 的文本编码和解码
 - 当前 API 是 `encode` / `decode`，不再是旧文档里的 `to_string` / `from_str`
-- 支持可选的带类型 Schema 输出
+- 支持可选的带基本类型提示 Schema 输出
 - 支持更易读的 pretty 文本和二进制格式
 - 适用于结构体、向量、Option、枚举、嵌套数据，以及基于条目列表的键值集合
 
