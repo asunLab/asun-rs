@@ -29,7 +29,7 @@ That makes repeated records shorter and easier to transport or feed into models.
 
 - Serde-based text encoding and decoding
 - Current API uses `encode` / `decode`, not the older `to_string` / `from_str` names
-- Optional typed schema output
+- Optional scalar-hint schema output
 - Pretty text output and binary format
 - Works well for structs, vectors, options, enums, nested data, and entry-list based keyed collections
 
