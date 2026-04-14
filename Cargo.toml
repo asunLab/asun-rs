@@ -1,15 +1,15 @@
 [package]
-name = "ason"
+name = "asun"
 version = "1.0.0"
 authors = ["Athan Xiao <athanxiao@gmail.com>"]
 edition = "2024"
-description = "ASON (Array-Schema Object Notation) - A high-performance, token-efficient serde data format with schema-data separation"
+description = "ASUN (Array-Schema Unified Notation) - A high-performance, token-efficient serde data format with schema-data separation"
 license = "MIT"
-repository = "https://github.com/ason-lab/ason-rs"
+repository = "https://github.com/asun-lab/asun-rs"
 readme = "README.md"
-documentation = "https://docs.rs/ason"
-homepage = "https://github.com/ason-lab/ason-rs"
-keywords = ["ason", "serialization", "serde", "token-efficient", "schema"]
+documentation = "https://docs.rs/asun"
+homepage = "https://github.com/asun-lab/asun-rs"
+keywords = ["asun", "serialization", "serde", "token-efficient", "schema"]
 categories = ["encoding", "parser-implementations"]
 rust-version = "1.85"
 

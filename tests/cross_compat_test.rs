@@ -1,4 +1,4 @@
-use ason::{decode, encode, encode_typed};
+use asun::{decode, encode, encode_typed};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -1146,30 +1146,30 @@ fn cross_vec_single_row() {
 }
 
 // ============================================================================
-// Dimension 28: ASON-like syntax in strings
+// Dimension 28: ASUN-like syntax in strings
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-struct SrcAsonLike {
+struct SrcAsunLike {
     id: i64,
     data: String,
     code: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct DstAsonLikeThin {
+struct DstAsunLikeThin {
     id: i64,
 }
 
 #[test]
-fn cross_skip_string_containing_ason_syntax() {
-    let src = SrcAsonLike {
+fn cross_skip_string_containing_asun_syntax() {
+    let src = SrcAsunLike {
         id: 1,
         data: "{a,b}:(1,2)".into(),
         code: "[(x,y),(z,w)]".into(),
     };
     let data = encode(&src).unwrap();
-    let dst: DstAsonLikeThin = decode(&data).unwrap();
+    let dst: DstAsunLikeThin = decode(&data).unwrap();
     assert_eq!(dst.id, 1);
 }
 

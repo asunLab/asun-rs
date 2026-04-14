@@ -1,6 +1,6 @@
-//! ASON Binary Format (ASON-BIN)
+//! ASUN Binary Format (ASUN-BIN)
 //!
-//! A high-performance binary encoding for ASON data structures.
+//! A high-performance binary encoding for ASUN data structures.
 //! Provides `encode_binary` and `decode_binary` for zero-overhead struct ↔ bytes conversion.
 //!
 //! ## Wire Format (all integers little-endian)
@@ -51,12 +51,12 @@ use serde::{Deserialize, Serialize};
 // Public API
 // ============================================================================
 
-/// Serialize `value` to a `Vec<u8>` using the ASON binary format.
+/// Serialize `value` to a `Vec<u8>` using the ASUN binary format.
 ///
 /// # Example
 /// ```rust,ignore
 /// let user = User { id: 1, name: "Alice".into(), active: true };
-/// let bytes = ason::encode_binary(&user)?;
+/// let bytes = asun::encode_binary(&user)?;
 /// ```
 #[inline]
 pub fn encode_binary<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -65,14 +65,14 @@ pub fn encode_binary<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(ser.buf)
 }
 
-/// Deserialize a value from ASON binary bytes.
+/// Deserialize a value from ASUN binary bytes.
 ///
 /// The lifetime `'de` allows **zero-copy** deserialization: any `&'de str` fields
 /// in the target type will borrow directly from `data` with no allocation.
 ///
 /// # Example
 /// ```rust,ignore
-/// let user: User = ason::decode_binary(&bytes)?;
+/// let user: User = asun::decode_binary(&bytes)?;
 /// ```
 #[inline]
 pub fn decode_binary<'de, T: Deserialize<'de>>(data: &'de [u8]) -> Result<T> {
@@ -664,7 +664,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDeserializer<'de> {
     /// `deserialize_any` is only called by generic serde code that inspect values.
     fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value> {
         Err(Error::Message(
-            "ASON binary format is not self-describing; use typed deserialization".into(),
+            "ASUN binary format is not self-describing; use typed deserialization".into(),
         ))
     }
 

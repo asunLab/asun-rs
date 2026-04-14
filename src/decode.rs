@@ -151,7 +151,7 @@ impl<'de> Deserializer<'de> {
         }
     }
 
-    /// Inline scalar whitespace skipping — fastest for ASON's compact format
+    /// Inline scalar whitespace skipping — fastest for ASUN's compact format
     /// where values are separated by commas with no whitespace.
     /// SIMD overhead (splat/compare/movemask) is too costly when the
     /// common case is 0 whitespace bytes.
@@ -293,7 +293,9 @@ impl<'de> Deserializer<'de> {
                 }
                 self.skip_whitespace();
                 if self.pos >= self.input.len() || self.input[self.pos] != b']' {
-                    return Err(Error::Message("expected ']' in array type annotation".into()));
+                    return Err(Error::Message(
+                        "expected ']' in array type annotation".into(),
+                    ));
                 }
                 self.pos += 1;
                 Ok(())
@@ -348,7 +350,7 @@ impl<'de> Deserializer<'de> {
         }
     }
 
-    /// Skip a single ASON value (string, number, bool, tuple, array, etc.)
+    /// Skip a single ASUN value (string, number, bool, tuple, array, etc.)
     fn skip_value(&mut self) -> Result<()> {
         self.skip_layout();
         if self.pos >= self.input.len() {
@@ -1168,7 +1170,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             }
             self.schema_fields = Some(fields);
             self.vec_schema_active = true;
-            let value = visitor.visit_seq(AsonVecAccess {
+            let value = visitor.visit_seq(AsunVecAccess {
                 de: self,
                 first: true,
             })?;
@@ -1179,7 +1181,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             if self.next_byte()? != b'[' {
                 return Err(Error::ExpectedOpenBracket);
             }
-            let value = visitor.visit_seq(AsonSeqAccess {
+            let value = visitor.visit_seq(AsunSeqAccess {
                 de: self,
                 first: true,
             })?;
@@ -1197,7 +1199,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         if self.next_byte()? != b'(' {
             return Err(Error::ExpectedOpenParen);
         }
-        let value = visitor.visit_seq(AsonTupleAccess {
+        let value = visitor.visit_seq(AsunTupleAccess {
             de: self,
             first: true,
         })?;
@@ -1252,13 +1254,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
 
                 let mode = self.struct_mode_cached(fields);
                 let value = match mode {
-                    StructMode::Exact => visitor.visit_seq(AsonStructSeqAccess {
+                    StructMode::Exact => visitor.visit_seq(AsunStructSeqAccess {
                         de: self,
                         field_index: 0,
                         field_count: fields.len(),
                     })?,
                     StructMode::WithDefaults { missing_fields } => {
-                        visitor.visit_map(AsonStructAccessWithDefaults {
+                        visitor.visit_map(AsunStructAccessWithDefaults {
                             de: self,
                             field_index: 0,
                             default_index: 0,
@@ -1281,13 +1283,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             self.field_index = 0;
             let mode = self.struct_mode_cached(fields);
             let value = match mode {
-                StructMode::Exact => visitor.visit_seq(AsonStructSeqAccess {
+                StructMode::Exact => visitor.visit_seq(AsunStructSeqAccess {
                     de: self,
                     field_index: 0,
                     field_count: fields.len(),
                 })?,
                 StructMode::WithDefaults { missing_fields } => {
-                    visitor.visit_map(AsonStructAccessWithDefaults {
+                    visitor.visit_map(AsunStructAccessWithDefaults {
                         de: self,
                         field_index: 0,
                         default_index: 0,
@@ -1312,13 +1314,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 self.field_index = 0;
                 let mode = self.struct_mode_cached(fields);
                 let value = match mode {
-                    StructMode::Exact => visitor.visit_seq(AsonStructSeqAccess {
+                    StructMode::Exact => visitor.visit_seq(AsunStructSeqAccess {
                         de: self,
                         field_index: 0,
                         field_count: fields.len(),
                     })?,
                     StructMode::WithDefaults { missing_fields } => {
-                        visitor.visit_map(AsonStructAccessWithDefaults {
+                        visitor.visit_map(AsunStructAccessWithDefaults {
                             de: self,
                             field_index: 0,
                             default_index: 0,
@@ -1339,13 +1341,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 self.field_index = 0;
                 let mode = self.struct_mode_cached(fields);
                 let value = match mode {
-                    StructMode::Exact => visitor.visit_seq(AsonStructSeqAccess {
+                    StructMode::Exact => visitor.visit_seq(AsunStructSeqAccess {
                         de: self,
                         field_index: 0,
                         field_count: fields.len(),
                     })?,
                     StructMode::WithDefaults { missing_fields } => {
-                        visitor.visit_map(AsonStructAccessWithDefaults {
+                        visitor.visit_map(AsunStructAccessWithDefaults {
                             de: self,
                             field_index: 0,
                             default_index: 0,
@@ -1376,14 +1378,14 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         self.skip_layout();
         if self.peek_byte()? == b'(' {
             self.pos += 1;
-            let value = visitor.visit_enum(AsonEnumAccess { de: self })?;
+            let value = visitor.visit_enum(AsunEnumAccess { de: self })?;
             self.skip_layout();
             if self.pos < self.input.len() && self.input[self.pos] == b')' {
                 self.pos += 1;
             }
             Ok(value)
         } else {
-            visitor.visit_enum(AsonEnumAccess { de: self })
+            visitor.visit_enum(AsunEnumAccess { de: self })
         }
     }
 
@@ -1401,12 +1403,12 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
 }
 
 // --- Seq Access ---
-struct AsonSeqAccess<'a, 'de: 'a> {
+struct AsunSeqAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     first: bool,
 }
 
-impl<'a, 'de> SeqAccess<'de> for AsonSeqAccess<'a, 'de> {
+impl<'a, 'de> SeqAccess<'de> for AsunSeqAccess<'a, 'de> {
     type Error = Error;
 
     #[inline]
@@ -1435,12 +1437,12 @@ impl<'a, 'de> SeqAccess<'de> for AsonSeqAccess<'a, 'de> {
 }
 
 // --- Vec<Struct> Access for [{schema}]: format ---
-struct AsonVecAccess<'a, 'de: 'a> {
+struct AsunVecAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     first: bool,
 }
 
-impl<'a, 'de> SeqAccess<'de> for AsonVecAccess<'a, 'de> {
+impl<'a, 'de> SeqAccess<'de> for AsunVecAccess<'a, 'de> {
     type Error = Error;
 
     #[inline]
@@ -1468,12 +1470,12 @@ impl<'a, 'de> SeqAccess<'de> for AsonVecAccess<'a, 'de> {
 }
 
 // --- Tuple Access ---
-struct AsonTupleAccess<'a, 'de: 'a> {
+struct AsunTupleAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     first: bool,
 }
 
-impl<'a, 'de> SeqAccess<'de> for AsonTupleAccess<'a, 'de> {
+impl<'a, 'de> SeqAccess<'de> for AsunTupleAccess<'a, 'de> {
     type Error = Error;
 
     #[inline]
@@ -1502,13 +1504,13 @@ impl<'a, 'de> SeqAccess<'de> for AsonTupleAccess<'a, 'de> {
 }
 
 // --- Struct (positional) Seq Access (Exact field order) ---
-struct AsonStructSeqAccess<'a, 'de: 'a> {
+struct AsunStructSeqAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     field_index: usize,
     field_count: usize,
 }
 
-impl<'a, 'de> SeqAccess<'de> for AsonStructSeqAccess<'a, 'de> {
+impl<'a, 'de> SeqAccess<'de> for AsunStructSeqAccess<'a, 'de> {
     type Error = Error;
 
     #[inline(always)]
@@ -1547,14 +1549,14 @@ impl<'a, 'de> SeqAccess<'de> for AsonStructSeqAccess<'a, 'de> {
 }
 
 // --- Struct (positional) Access (With Defaults) ---
-struct AsonStructAccessWithDefaults<'a, 'de: 'a> {
+struct AsunStructAccessWithDefaults<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     field_index: usize,
     default_index: usize,
     missing_fields: MissingFields,
 }
 
-impl<'a, 'de> MapAccess<'de> for AsonStructAccessWithDefaults<'a, 'de> {
+impl<'a, 'de> MapAccess<'de> for AsunStructAccessWithDefaults<'a, 'de> {
     type Error = Error;
 
     #[inline(always)]
@@ -1630,11 +1632,11 @@ impl<'a, 'de> MapAccess<'de> for AsonStructAccessWithDefaults<'a, 'de> {
 }
 
 // --- Enum Access ---
-struct AsonEnumAccess<'a, 'de: 'a> {
+struct AsunEnumAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
 }
 
-impl<'a, 'de> de::EnumAccess<'de> for AsonEnumAccess<'a, 'de> {
+impl<'a, 'de> de::EnumAccess<'de> for AsunEnumAccess<'a, 'de> {
     type Error = Error;
     type Variant = Self;
 
@@ -1646,7 +1648,7 @@ impl<'a, 'de> de::EnumAccess<'de> for AsonEnumAccess<'a, 'de> {
     }
 }
 
-impl<'a, 'de> de::VariantAccess<'de> for AsonEnumAccess<'a, 'de> {
+impl<'a, 'de> de::VariantAccess<'de> for AsunEnumAccess<'a, 'de> {
     type Error = Error;
 
     #[inline]
@@ -1669,7 +1671,7 @@ impl<'a, 'de> de::VariantAccess<'de> for AsonEnumAccess<'a, 'de> {
         if self.de.pos < self.de.input.len() && self.de.input[self.de.pos] == b',' {
             self.de.pos += 1;
         }
-        let value = visitor.visit_seq(AsonTupleAccess {
+        let value = visitor.visit_seq(AsunTupleAccess {
             de: self.de,
             first: true,
         })?;
@@ -1692,13 +1694,13 @@ impl<'a, 'de> de::VariantAccess<'de> for AsonEnumAccess<'a, 'de> {
         self.de.field_index = 0;
         let mode = self.de.struct_mode_cached(fields);
         let value = match mode {
-            StructMode::Exact => visitor.visit_seq(AsonStructSeqAccess {
+            StructMode::Exact => visitor.visit_seq(AsunStructSeqAccess {
                 de: self.de,
                 field_index: 0,
                 field_count: fields.len(),
             })?,
             StructMode::WithDefaults { missing_fields } => {
-                visitor.visit_map(AsonStructAccessWithDefaults {
+                visitor.visit_map(AsunStructAccessWithDefaults {
                     de: self.de,
                     field_index: 0,
                     default_index: 0,

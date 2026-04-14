@@ -1,4 +1,4 @@
-use ason::decode;
+use asun::decode;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq)]

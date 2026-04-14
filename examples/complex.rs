@@ -1,4 +1,4 @@
-use ason::{decode, decode_binary, encode, encode_binary, encode_typed};
+use asun::{decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
 
 // ===========================================================================
@@ -50,7 +50,7 @@ struct Address {
 }
 
 // ===========================================================================
-// All-types struct — every primitive and compound type ASON supports
+// All-types struct — every primitive and compound type ASUN supports
 // ===========================================================================
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -241,7 +241,7 @@ struct ServiceConfig {
 }
 
 fn main() {
-    println!("=== ASON Complex Examples ===\n");
+    println!("=== ASUN Complex Examples ===\n");
 
     // -----------------------------------------------------------------------
     // 1. Nested struct (existing)
@@ -525,18 +525,18 @@ fn main() {
     println!("   first 200 chars: {}...", &s[..200.min(s.len())]);
     let country2: Country = decode(&s).unwrap();
     assert_eq!(country, country2);
-    println!("   ✓ 5-level ASON-text roundtrip OK");
+    println!("   ✓ 5-level ASUN-text roundtrip OK");
 
-    // ASON binary roundtrip
+    // ASUN binary roundtrip
     let bin = encode_binary(&country).unwrap();
     let country3: Country = decode_binary(&bin).unwrap();
     assert_eq!(country, country3);
-    println!("   ✓ 5-level ASON-bin roundtrip OK");
+    println!("   ✓ 5-level ASUN-bin roundtrip OK");
 
-    // Size comparison: ASON-text vs ASON-bin vs JSON
+    // Size comparison: ASUN-text vs ASUN-bin vs JSON
     let json = serde_json::to_string(&country).unwrap();
     println!(
-        "   ASON text: {} B | ASON bin: {} B | JSON: {} B",
+        "   ASUN text: {} B | ASUN bin: {} B | JSON: {} B",
         s.len(),
         bin.len(),
         json.len()
@@ -630,17 +630,17 @@ fn main() {
     println!("   serialized ({} bytes)", s.len());
     let universe2: Universe = decode(&s).unwrap();
     assert_eq!(universe, universe2);
-    println!("   ✓ 7-level ASON-text roundtrip OK");
+    println!("   ✓ 7-level ASUN-text roundtrip OK");
 
-    // ASON binary roundtrip
+    // ASUN binary roundtrip
     let bin = encode_binary(&universe).unwrap();
     let universe3: Universe = decode_binary(&bin).unwrap();
     assert_eq!(universe, universe3);
-    println!("   ✓ 7-level ASON-bin roundtrip OK");
+    println!("   ✓ 7-level ASUN-bin roundtrip OK");
 
     let json = serde_json::to_string(&universe).unwrap();
     println!(
-        "   ASON text: {} B | ASON bin: {} B | JSON: {} B",
+        "   ASUN text: {} B | ASUN bin: {} B | JSON: {} B",
         s.len(),
         bin.len(),
         json.len()
@@ -702,7 +702,7 @@ fn main() {
 
     let json = serde_json::to_string(&config).unwrap();
     println!(
-        "   ASON text: {} B | JSON: {} B | TEXT vs JSON: {:.0}% smaller",
+        "   ASUN text: {} B | JSON: {} B | TEXT vs JSON: {:.0}% smaller",
         s.len(),
         json.len(),
         (1.0 - s.len() as f64 / json.len() as f64) * 100.0
@@ -711,9 +711,9 @@ fn main() {
     let bin = encode_binary(&config).unwrap();
     let config3: ServiceConfig = decode_binary(&bin).unwrap();
     assert_eq!(config, config3);
-    println!("   ✓ config ASON-bin roundtrip OK");
+    println!("   ✓ config ASUN-bin roundtrip OK");
     println!(
-        "   ASON bin: {} B | BIN vs JSON: {:.0}% smaller",
+        "   ASUN bin: {} B | BIN vs JSON: {:.0}% smaller",
         bin.len(),
         (1.0 - bin.len() as f64 / json.len() as f64) * 100.0
     );
@@ -760,7 +760,7 @@ fn main() {
         .collect();
 
     // Serialize each country individually and measure total
-    let mut total_ason_bytes = 0usize;
+    let mut total_asun_bytes = 0usize;
     let mut total_json_bytes = 0usize;
     let mut total_bin_bytes = 0usize;
     for c in &countries {
@@ -773,18 +773,18 @@ fn main() {
         // Verify binary roundtrip
         let c3: Country = decode_binary(&b).unwrap();
         assert_eq!(c, &c3);
-        total_ason_bytes += s.len();
+        total_asun_bytes += s.len();
         total_json_bytes += j.len();
         total_bin_bytes += b.len();
     }
     println!("   100 countries with 5-level nesting:");
     println!(
-        "   Total ASON text: {} bytes ({:.1} KB)",
-        total_ason_bytes,
-        total_ason_bytes as f64 / 1024.0
+        "   Total ASUN text: {} bytes ({:.1} KB)",
+        total_asun_bytes,
+        total_asun_bytes as f64 / 1024.0
     );
     println!(
-        "   Total ASON bin:  {} bytes ({:.1} KB)",
+        "   Total ASUN bin:  {} bytes ({:.1} KB)",
         total_bin_bytes,
         total_bin_bytes as f64 / 1024.0
     );
@@ -795,13 +795,13 @@ fn main() {
     );
     println!(
         "   TEXT vs JSON: {:.0}% smaller | BIN vs JSON: {:.0}% smaller",
-        (1.0 - total_ason_bytes as f64 / total_json_bytes as f64) * 100.0,
+        (1.0 - total_asun_bytes as f64 / total_json_bytes as f64) * 100.0,
         (1.0 - total_bin_bytes as f64 / total_json_bytes as f64) * 100.0
     );
     println!("   ✓ all 100 countries roundtrip OK (text + bin)");
 
     // -----------------------------------------------------------------------
-    // 14. Deserialize from ASON with deeply nested schema type hints
+    // 14. Deserialize from ASUN with deeply nested schema type hints
     // -----------------------------------------------------------------------
     println!("\n14. Deserialize with nested schema type hints:");
     let input = "{name@str,code@str,population@int,gdp_trillion@float,regions@[{name@str,cities@[{name@str,population@int,area_km2@float,districts@[{name@str,population@int,streets@[{name@str,length_km@float,buildings@[{name@str,floors@int,residential@bool,height_m@float}]}]}]}]}]}:(TestLand,TL,1000000,0.5,[(TestRegion,[(TestCity,500000,100.0,[(Central,250000,[(Main St,2.5,[(HQ,10,false,45.0)])])])])])";
@@ -934,7 +934,7 @@ fn main() {
     println!("   ✓ triple-nested array roundtrip OK");
 
     // -----------------------------------------------------------------------
-    // 18. Comments in ASON
+    // 18. Comments in ASUN
     // -----------------------------------------------------------------------
     println!("\n18. Comments:");
     let _input = "/* Top-level comment */

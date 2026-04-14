@@ -1,4 +1,4 @@
-use ason::{decode, decode_binary, encode, encode_binary, encode_typed};
+use asun::{decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -9,7 +9,7 @@ struct User {
 }
 
 fn main() {
-    println!("=== ASON Basic Examples ===\n");
+    println!("=== ASUN Basic Examples ===\n");
 
     // 1. Serialize a single struct
     let user = User {
@@ -17,9 +17,9 @@ fn main() {
         name: "Alice".into(),
         active: true,
     };
-    let ason_str = encode(&user).unwrap();
+    let asun_str = encode(&user).unwrap();
     println!("Serialize single struct:");
-    println!("  {}\n", ason_str);
+    println!("  {}\n", asun_str);
 
     // 2. Serialize with type annotations (encode_typed)
     let typed_str = encode_typed(&user).unwrap();
@@ -27,7 +27,7 @@ fn main() {
     println!("  {}\n", typed_str);
     assert!(typed_str.starts_with("{id@int,name@str,active@bool}:"));
 
-    // 3. Deserialize from ASON (accepts both annotated and unannotated)
+    // 3. Deserialize from ASUN (accepts both annotated and unannotated)
     let input = "{id@int,name@str,active@bool}:(1,Alice,true)";
     let user: User = decode(input).unwrap();
     println!("Deserialize single struct:");
@@ -51,9 +51,9 @@ fn main() {
             active: true,
         },
     ];
-    let ason_vec = encode(&users).unwrap();
+    let asun_vec = encode(&users).unwrap();
     println!("Serialize vec (schema-driven):");
-    println!("  {}\n", ason_vec);
+    println!("  {}\n", asun_vec);
 
     // 5. Serialize vec with type annotations (encode_typed)
     let typed_vec = encode_typed(&users).unwrap();
@@ -81,44 +81,44 @@ fn main() {
         println!("  {:?}", u);
     }
 
-    // 8. Roundtrip (ASON-text + ASON-bin + JSON)
-    println!("\n8. Roundtrip (ASON-text vs ASON-bin vs JSON):");
+    // 8. Roundtrip (ASUN-text + ASUN-bin + JSON)
+    println!("\n8. Roundtrip (ASUN-text vs ASUN-bin vs JSON):");
     let original = User {
         id: 42,
         name: "Test User".into(),
         active: true,
     };
-    // ASON text
-    let ason_str = encode(&original).unwrap();
-    let from_ason: User = decode(&ason_str).unwrap();
-    assert_eq!(original, from_ason);
-    // ASON binary
-    let ason_bin = encode_binary(&original).unwrap();
-    let decode_binary_val: User = decode_binary(&ason_bin).unwrap();
+    // ASUN text
+    let asun_str = encode(&original).unwrap();
+    let from_asun: User = decode(&asun_str).unwrap();
+    assert_eq!(original, from_asun);
+    // ASUN binary
+    let asun_bin = encode_binary(&original).unwrap();
+    let decode_binary_val: User = decode_binary(&asun_bin).unwrap();
     assert_eq!(original, decode_binary_val);
     // JSON
     let json_str = serde_json::to_string(&original).unwrap();
     let from_json: User = serde_json::from_str(&json_str).unwrap();
     assert_eq!(original, from_json);
     println!("  original:     {:?}", original);
-    println!("  ASON text:    {} ({} B)", ason_str, ason_str.len());
-    println!("  ASON binary:  {} B", ason_bin.len());
+    println!("  ASUN text:    {} ({} B)", asun_str, asun_str.len());
+    println!("  ASUN binary:  {} B", asun_bin.len());
     println!("  JSON:         {} ({} B)", json_str, json_str.len());
     println!("  ✓ all 3 formats roundtrip OK");
 
-    // 9. Vec roundtrip (ASON-text + ASON-bin + JSON)
-    println!("\n9. Vec roundtrip (ASON-text vs ASON-bin vs JSON):");
-    let vec_ason = encode(&users).unwrap();
+    // 9. Vec roundtrip (ASUN-text + ASUN-bin + JSON)
+    println!("\n9. Vec roundtrip (ASUN-text vs ASUN-bin vs JSON):");
+    let vec_asun = encode(&users).unwrap();
     let vec_bin = encode_binary(&users).unwrap();
     let vec_json = serde_json::to_string(&users).unwrap();
-    let v1: Vec<User> = decode(&vec_ason).unwrap();
+    let v1: Vec<User> = decode(&vec_asun).unwrap();
     let v2: Vec<User> = decode_binary(&vec_bin).unwrap();
     let v3: Vec<User> = serde_json::from_str(&vec_json).unwrap();
     assert_eq!(users, v1);
     assert_eq!(users, v2);
     assert_eq!(users, v3);
-    println!("  ASON text:   {} B", vec_ason.len());
-    println!("  ASON binary: {} B", vec_bin.len());
+    println!("  ASUN text:   {} B", vec_asun.len());
+    println!("  ASUN binary: {} B", vec_bin.len());
     println!("  JSON:        {} B", vec_json.len());
     println!(
         "  BIN vs JSON: {:.0}% smaller",

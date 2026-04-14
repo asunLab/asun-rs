@@ -1,21 +1,21 @@
-# ason
+# asun
 
-[![Crates.io](https://img.shields.io/crates/v/ason.svg)](https://crates.io/crates/ason)
-[![Documentation](https://docs.rs/ason/badge.svg)](https://docs.rs/ason)
+[![Crates.io](https://img.shields.io/crates/v/asun.svg)](https://crates.io/crates/asun)
+[![Documentation](https://docs.rs/asun/badge.svg)](https://docs.rs/asun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Rust support for [ASON](https://github.com/ason-lab/ason), a schema-driven format for compact structured data with serde-based encoding and decoding.
+Rust support for [ASUN](https://github.com/asun-lab/asun), a schema-driven format for compact structured data with serde-based encoding and decoding.
 
 [中文文档](README_CN.md)
 
-## Why ASON
+## Why ASUN
 
-ASON writes schema once and keeps each row positional:
+ASUN writes schema once and keeps each row positional:
 
 ```json
 [
-  {"id": 1, "name": "Alice", "active": true},
-  {"id": 2, "name": "Bob", "active": false}
+  { "id": 1, "name": "Alice", "active": true },
+  { "id": 2, "name": "Bob", "active": false }
 ]
 ```
 
@@ -37,14 +37,14 @@ That makes repeated records shorter and easier to transport or feed into models.
 
 ```toml
 [dependencies]
-ason = "0.1"
+asun = "0.1"
 serde = { version = "1", features = ["derive"] }
 ```
 
 ## Quick Start
 
 ```rust
-use ason::{decode, encode, encode_typed};
+use asun::{decode, encode, encode_typed};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -54,7 +54,7 @@ struct User {
     active: bool,
 }
 
-fn main() -> ason::Result<()> {
+fn main() -> asun::Result<()> {
     let user = User { id: 1, name: "Alice".into(), active: true };
 
     let text = encode(&user)?;
@@ -83,7 +83,7 @@ let decoded: Vec<User> = decode(&text)?;
 ### Pretty and binary output
 
 ```rust
-use ason::{decode_binary, encode_binary, encode_pretty, encode_pretty_typed};
+use asun::{decode_binary, encode_binary, encode_pretty, encode_pretty_typed};
 
 let pretty = encode_pretty(&users)?;
 let pretty_typed = encode_pretty_typed(&users)?;
@@ -93,13 +93,13 @@ let decoded: Vec<User> = decode_binary(&bin)?;
 
 ## Current API
 
-| Function | Purpose |
-| --- | --- |
-| `encode` / `encode_typed` | Encode to text |
-| `decode` | Decode from text |
+| Function                                | Purpose            |
+| --------------------------------------- | ------------------ |
+| `encode` / `encode_typed`               | Encode to text     |
+| `decode`                                | Decode from text   |
 | `encode_pretty` / `encode_pretty_typed` | Pretty text output |
-| `encode_binary` | Encode to binary |
-| `decode_binary` | Decode from binary |
+| `encode_binary`                         | Encode to binary   |
+| `decode_binary`                         | Decode from binary |
 
 ## Run Examples
 
@@ -126,11 +126,11 @@ The Rust benchmark now uses the same two-line summary style as the Go example:
 
 ```text
 Flat struct × 1000 (8 fields, vec)
-  Serialize:   JSON   411.05ms /   121675 B | ASON   175.25ms (2.3x) /    56718 B (46.6%) | BIN    41.32ms (9.9x) /    74454 B (61.2%)
-  Deserialize: JSON   287.06ms | ASON   195.57ms (1.5x) | BIN    64.62ms (4.4x)
+  Serialize:   JSON   411.05ms /   121675 B | ASUN   175.25ms (2.3x) /    56718 B (46.6%) | BIN    41.32ms (9.9x) /    74454 B (61.2%)
+  Deserialize: JSON   287.06ms | ASUN   195.57ms (1.5x) | BIN    64.62ms (4.4x)
 ```
 
-`ASON` / `BIN` ratios are measured against JSON, and size percentages show the remaining size relative to JSON.
+`ASUN` / `BIN` ratios are measured against JSON, and size percentages show the remaining size relative to JSON.
 
 ## License
 

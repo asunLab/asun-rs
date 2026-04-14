@@ -114,7 +114,7 @@ fn needs_quoting(s: &str) -> bool {
         return true;
     }
 
-    // SIMD fast-path: check for ASON special chars in bulk
+    // SIMD fast-path: check for ASUN special chars in bulk
     if simd::simd_has_special_chars(bytes) {
         return true;
     }
@@ -182,7 +182,7 @@ pub fn encode<T: Serialize>(value: &T) -> Result<String> {
     Ok(unsafe { String::from_utf8_unchecked(serializer.buf) })
 }
 
-/// Serialize a single struct to ASON string with type-annotated schema.
+/// Serialize a single struct to ASUN string with type-annotated schema.
 ///
 /// Output example: `{id@int,name@str,active@bool}:(1,Alice,true)`
 pub fn encode_typed<T: Serialize>(value: &T) -> Result<String> {
@@ -220,7 +220,10 @@ fn schema_field_name_needs_quotes(name: &str) -> bool {
     }
     for (idx, &b) in name.as_bytes().iter().enumerate() {
         if b <= 0x20
-            || matches!(b, b',' | b'@' | b':' | b'{' | b'}' | b'[' | b']' | b'(' | b')' | b'"' | b'\\')
+            || matches!(
+                b,
+                b',' | b'@' | b':' | b'{' | b'}' | b'[' | b']' | b'(' | b')' | b'"' | b'\\'
+            )
         {
             return true;
         }

@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "ason"
+name = "asun"
 version = "1.0.0"
 dependencies = [
  "fast-float2",

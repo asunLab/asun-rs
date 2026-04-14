@@ -1,4 +1,4 @@
-use ason;
+use asun;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -52,10 +52,10 @@ fn main() {
     }];
 
     // Encode
-    let ason_str = ason::encode(&users).unwrap();
-    println!("Encoded ASON:\n{}", ason_str);
+    let asun_str = asun::encode(&users).unwrap();
+    println!("Encoded ASUN:\n{}", asun_str);
 
     // Decode into Human
-    let decoded: Vec<Human> = ason::decode(&ason_str).unwrap();
+    let decoded: Vec<Human> = asun::decode(&asun_str).unwrap();
     println!("\nDecoded into Human list:\n{:?}", decoded);
 }

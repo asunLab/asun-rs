@@ -1,21 +1,21 @@
-# ason
+# asun
 
-[![Crates.io](https://img.shields.io/crates/v/ason.svg)](https://crates.io/crates/ason)
-[![Documentation](https://docs.rs/ason/badge.svg)](https://docs.rs/ason)
+[![Crates.io](https://img.shields.io/crates/v/asun.svg)](https://crates.io/crates/asun)
+[![Documentation](https://docs.rs/asun/badge.svg)](https://docs.rs/asun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-面向 [ASON](https://github.com/ason-lab/ason) 的 Rust 实现，基于 serde 提供紧凑结构化数据的编码与解码。
+面向 [ASUN](https://github.com/asun-lab/asun) 的 Rust 实现，基于 serde 提供紧凑结构化数据的编码与解码。
 
 [English](README.md)
 
-## 为什么用 ASON
+## 为什么用 ASUN
 
-ASON 只写一次 Schema，后续每行数据按位置保存：
+ASUN 只写一次 Schema，后续每行数据按位置保存：
 
 ```json
 [
-  {"id": 1, "name": "Alice", "active": true},
-  {"id": 2, "name": "Bob", "active": false}
+  { "id": 1, "name": "Alice", "active": true },
+  { "id": 2, "name": "Bob", "active": false }
 ]
 ```
 
@@ -37,14 +37,14 @@ ASON 只写一次 Schema，后续每行数据按位置保存：
 
 ```toml
 [dependencies]
-ason = "0.1"
+asun = "0.1"
 serde = { version = "1", features = ["derive"] }
 ```
 
 ## 快速开始
 
 ```rust
-use ason::{decode, encode, encode_typed};
+use asun::{decode, encode, encode_typed};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -54,7 +54,7 @@ struct User {
     active: bool,
 }
 
-fn main() -> ason::Result<()> {
+fn main() -> asun::Result<()> {
     let user = User { id: 1, name: "Alice".into(), active: true };
 
     let text = encode(&user)?;
@@ -83,7 +83,7 @@ let decoded: Vec<User> = decode(&text)?;
 ### Pretty 文本和二进制
 
 ```rust
-use ason::{decode_binary, encode_binary, encode_pretty, encode_pretty_typed};
+use asun::{decode_binary, encode_binary, encode_pretty, encode_pretty_typed};
 
 let pretty = encode_pretty(&users)?;
 let pretty_typed = encode_pretty_typed(&users)?;
@@ -93,13 +93,13 @@ let decoded: Vec<User> = decode_binary(&bin)?;
 
 ## 当前 API
 
-| 函数 | 作用 |
-| --- | --- |
-| `encode` / `encode_typed` | 编码为文本 |
-| `decode` | 从文本解码 |
+| 函数                                    | 作用             |
+| --------------------------------------- | ---------------- |
+| `encode` / `encode_typed`               | 编码为文本       |
+| `decode`                                | 从文本解码       |
 | `encode_pretty` / `encode_pretty_typed` | 生成更易读的文本 |
-| `encode_binary` | 编码为二进制 |
-| `decode_binary` | 从二进制解码 |
+| `encode_binary`                         | 编码为二进制     |
+| `decode_binary`                         | 从二进制解码     |
 
 ## 运行示例
 
@@ -126,11 +126,11 @@ Rust 版 benchmark 现在和 Go 版保持同一种两行汇总样式：
 
 ```text
 Flat struct × 1000 (8 fields, vec)
-  Serialize:   JSON   411.05ms /   121675 B | ASON   175.25ms (2.3x) /    56718 B (46.6%) | BIN    41.32ms (9.9x) /    74454 B (61.2%)
-  Deserialize: JSON   287.06ms | ASON   195.57ms (1.5x) | BIN    64.62ms (4.4x)
+  Serialize:   JSON   411.05ms /   121675 B | ASUN   175.25ms (2.3x) /    56718 B (46.6%) | BIN    41.32ms (9.9x) /    74454 B (61.2%)
+  Deserialize: JSON   287.06ms | ASUN   195.57ms (1.5x) | BIN    64.62ms (4.4x)
 ```
 
-其中 `ASON` / `BIN` 后面的倍率都是相对 JSON 计算的，大小百分比表示“占 JSON 的剩余比例”。
+其中 `ASUN` / `BIN` 后面的倍率都是相对 JSON 计算的，大小百分比表示“占 JSON 的剩余比例”。
 
 ## 许可证
 

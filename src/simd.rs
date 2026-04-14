@@ -1,4 +1,4 @@
-//! Cross-platform SIMD utilities for accelerating ASON parsing and serialization.
+//! Cross-platform SIMD utilities for accelerating ASUN parsing and serialization.
 //!
 //! Provides 128-bit SIMD operations for:
 //! - **aarch64**: ARM NEON intrinsics (always available on AArch64)
@@ -229,7 +229,7 @@ pub use imp::*;
 // High-level SIMD string operations
 // ============================================================================
 
-/// SIMD-accelerated check: does `s` contain any byte that needs ASON quoting?
+/// SIMD-accelerated check: does `s` contain any byte that needs ASUN quoting?
 /// Checks for: control chars (<=0x1f), comma, at-sign, parens, brackets, double-quote, backslash.
 ///
 /// Returns `true` if any special byte is found.
@@ -253,7 +253,10 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
             let chunk = load(bytes.as_ptr().add(i));
             let mask = movemask(or(
                 or(
-                    or(cmple(chunk, v_1f), or(cmpeq(chunk, v_comma), cmpeq(chunk, v_at))),
+                    or(
+                        cmple(chunk, v_1f),
+                        or(cmpeq(chunk, v_comma), cmpeq(chunk, v_at)),
+                    ),
                     or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
                 ),
                 or(

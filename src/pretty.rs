@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Pretty-print formatter — smart indentation for ASON output
+// Pretty-print formatter — smart indentation for ASUN output
 // ---------------------------------------------------------------------------
 //
 // Simple structures stay inline:
@@ -18,19 +18,19 @@ use serde::Serialize;
 
 const PRETTY_MAX_WIDTH: usize = 100;
 
-/// Serialize a struct to pretty-formatted ASON string.
+/// Serialize a struct to pretty-formatted ASUN string.
 pub fn encode_pretty<T: Serialize>(value: &T) -> Result<String> {
     let compact = crate::encode::encode(value)?;
     Ok(pretty_format(compact.as_bytes()))
 }
 
-/// Serialize a struct to pretty-formatted ASON string with type annotations.
+/// Serialize a struct to pretty-formatted ASUN string with type annotations.
 pub fn encode_pretty_typed<T: Serialize>(value: &T) -> Result<String> {
     let compact = crate::encode::encode_typed(value)?;
     Ok(pretty_format(compact.as_bytes()))
 }
 
-/// Reformat compact ASON bytes with smart indentation.
+/// Reformat compact ASUN bytes with smart indentation.
 pub fn pretty_format(src: &[u8]) -> String {
     let n = src.len();
     if n == 0 {

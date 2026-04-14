@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod format_validation {
-    use ason::{decode, encode_pretty, encode_pretty_typed};
+    use asun::{decode, encode_pretty, encode_pretty_typed};
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]

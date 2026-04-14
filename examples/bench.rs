@@ -1,4 +1,4 @@
-use ason::{decode, decode_binary, encode, encode_binary, encode_typed};
+use asun::{decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ struct User {
 }
 
 // ===========================================================================
-// 2. All-types struct — covers every ASON primitive/compound
+// 2. All-types struct — covers every ASUN primitive/compound
 // ===========================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -245,13 +245,13 @@ fn format_percent(part: usize, whole: usize) -> String {
 struct BenchResult {
     name: String,
     json_ser_ms: f64,
-    ason_ser_ms: f64,
+    asun_ser_ms: f64,
     bin_ser_ms: f64,
     json_de_ms: f64,
-    ason_de_ms: f64,
+    asun_de_ms: f64,
     bin_de_ms: f64,
     json_bytes: usize,
-    ason_bytes: usize,
+    asun_bytes: usize,
     bin_bytes: usize,
 }
 
@@ -259,23 +259,23 @@ impl BenchResult {
     fn print(&self) {
         println!("  {}", self.name);
         println!(
-            "    Serialize:   JSON {:.2}ms/{}B | ASON {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
+            "    Serialize:   JSON {:.2}ms/{}B | ASUN {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
             self.json_ser_ms,
             self.json_bytes,
-            self.ason_ser_ms,
-            format_ratio(self.json_ser_ms, self.ason_ser_ms),
-            self.ason_bytes,
-            format_percent(self.ason_bytes, self.json_bytes),
+            self.asun_ser_ms,
+            format_ratio(self.json_ser_ms, self.asun_ser_ms),
+            self.asun_bytes,
+            format_percent(self.asun_bytes, self.json_bytes),
             self.bin_ser_ms,
             format_ratio(self.json_ser_ms, self.bin_ser_ms),
             self.bin_bytes,
             format_percent(self.bin_bytes, self.json_bytes),
         );
         println!(
-            "    Deserialize: JSON {:>8.2}ms | ASON {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
+            "    Deserialize: JSON {:>8.2}ms | ASUN {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
             self.json_de_ms,
-            self.ason_de_ms,
-            format_ratio(self.json_de_ms, self.ason_de_ms),
+            self.asun_de_ms,
+            format_ratio(self.json_de_ms, self.asun_de_ms),
             self.bin_de_ms,
             format_ratio(self.json_de_ms, self.bin_de_ms),
         );
@@ -297,13 +297,13 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASON serialize
-    let mut ason_str = String::new();
+    // ASUN serialize
+    let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
-        ason_str = encode(&users).unwrap();
+        asun_str = encode(&users).unwrap();
     }
-    let ason_ser = start.elapsed();
+    let asun_ser = start.elapsed();
 
     let mut bin_buf = Vec::new();
     let start = Instant::now();
@@ -319,12 +319,12 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     }
     let json_de = start.elapsed();
 
-    // ASON deserialize
+    // ASUN deserialize
     let start = Instant::now();
     for _ in 0..iterations {
-        let _: Vec<User> = decode(&ason_str).unwrap();
+        let _: Vec<User> = decode(&asun_str).unwrap();
     }
-    let ason_de = start.elapsed();
+    let asun_de = start.elapsed();
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -333,7 +333,7 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     let bin_de = start.elapsed();
 
     // Verify
-    let decoded: Vec<User> = decode(&ason_str).unwrap();
+    let decoded: Vec<User> = decode(&asun_str).unwrap();
     assert_eq!(users, decoded, "flat {} roundtrip failed", count);
     let decoded_bin: Vec<User> = decode_binary(&bin_buf).unwrap();
     assert_eq!(users, decoded_bin, "flat {} binary roundtrip failed", count);
@@ -341,13 +341,13 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     BenchResult {
         name: format!("Flat struct × {} (8 fields, vec)", count),
         json_ser_ms: json_ser.as_secs_f64() * 1000.0,
-        ason_ser_ms: ason_ser.as_secs_f64() * 1000.0,
+        asun_ser_ms: asun_ser.as_secs_f64() * 1000.0,
         bin_ser_ms: bin_ser.as_secs_f64() * 1000.0,
         json_de_ms: json_de.as_secs_f64() * 1000.0,
-        ason_de_ms: ason_de.as_secs_f64() * 1000.0,
+        asun_de_ms: asun_de.as_secs_f64() * 1000.0,
         bin_de_ms: bin_de.as_secs_f64() * 1000.0,
         json_bytes: json_str.len(),
-        ason_bytes: ason_str.len(),
+        asun_bytes: asun_str.len(),
         bin_bytes: bin_buf.len(),
     }
 }
@@ -366,13 +366,13 @@ fn bench_all_types(count: usize, iterations: u32) -> BenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASON: serialize vec directly
-    let mut ason_str = String::new();
+    // ASUN: serialize vec directly
+    let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
-        ason_str = encode(&items).unwrap();
+        asun_str = encode(&items).unwrap();
     }
-    let ason_ser = start.elapsed();
+    let asun_ser = start.elapsed();
 
     let mut bin_buf = Vec::new();
     let start = Instant::now();
@@ -387,12 +387,12 @@ fn bench_all_types(count: usize, iterations: u32) -> BenchResult {
     }
     let json_de = start.elapsed();
 
-    // ASON: deserialize vec directly
+    // ASUN: deserialize vec directly
     let start = Instant::now();
     for _ in 0..iterations {
-        let _: Vec<AllTypes> = decode(&ason_str).unwrap();
+        let _: Vec<AllTypes> = decode(&asun_str).unwrap();
     }
-    let ason_de = start.elapsed();
+    let asun_de = start.elapsed();
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -401,7 +401,7 @@ fn bench_all_types(count: usize, iterations: u32) -> BenchResult {
     let bin_de = start.elapsed();
 
     // Verify
-    let decoded: Vec<AllTypes> = decode(&ason_str).unwrap();
+    let decoded: Vec<AllTypes> = decode(&asun_str).unwrap();
     assert_eq!(items, decoded, "all-types {} roundtrip failed", count);
     let decoded_bin: Vec<AllTypes> = decode_binary(&bin_buf).unwrap();
     assert_eq!(
@@ -413,13 +413,13 @@ fn bench_all_types(count: usize, iterations: u32) -> BenchResult {
     BenchResult {
         name: format!("All-types struct × {} (16 fields, vec)", count),
         json_ser_ms: json_ser.as_secs_f64() * 1000.0,
-        ason_ser_ms: ason_ser.as_secs_f64() * 1000.0,
+        asun_ser_ms: asun_ser.as_secs_f64() * 1000.0,
         bin_ser_ms: bin_ser.as_secs_f64() * 1000.0,
         json_de_ms: json_de.as_secs_f64() * 1000.0,
-        ason_de_ms: ason_de.as_secs_f64() * 1000.0,
+        asun_de_ms: asun_de.as_secs_f64() * 1000.0,
         bin_de_ms: bin_de.as_secs_f64() * 1000.0,
         json_bytes: json_str.len(),
-        ason_bytes: ason_str.len(),
+        asun_bytes: asun_str.len(),
         bin_bytes: bin_buf.len(),
     }
 }
@@ -438,13 +438,13 @@ fn bench_deep(count: usize, iterations: u32) -> BenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASON: serialize vec directly
-    let mut ason_str = String::new();
+    // ASUN: serialize vec directly
+    let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
-        ason_str = encode(&companies).unwrap();
+        asun_str = encode(&companies).unwrap();
     }
-    let ason_ser = start.elapsed();
+    let asun_ser = start.elapsed();
 
     let mut bin_buf = Vec::new();
     let start = Instant::now();
@@ -461,9 +461,9 @@ fn bench_deep(count: usize, iterations: u32) -> BenchResult {
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let _: Vec<Company> = decode(&ason_str).unwrap();
+        let _: Vec<Company> = decode(&asun_str).unwrap();
     }
-    let ason_de = start.elapsed();
+    let asun_de = start.elapsed();
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -472,7 +472,7 @@ fn bench_deep(count: usize, iterations: u32) -> BenchResult {
     let bin_de = start.elapsed();
 
     // Verify
-    let decoded: Vec<Company> = decode(&ason_str).unwrap();
+    let decoded: Vec<Company> = decode(&asun_str).unwrap();
     assert_eq!(companies, decoded, "deep {} roundtrip failed", count);
     let decoded_bin: Vec<Company> = decode_binary(&bin_buf).unwrap();
     assert_eq!(
@@ -487,13 +487,13 @@ fn bench_deep(count: usize, iterations: u32) -> BenchResult {
             count
         ),
         json_ser_ms: json_ser.as_secs_f64() * 1000.0,
-        ason_ser_ms: ason_ser.as_secs_f64() * 1000.0,
+        asun_ser_ms: asun_ser.as_secs_f64() * 1000.0,
         bin_ser_ms: bin_ser.as_secs_f64() * 1000.0,
         json_de_ms: json_de.as_secs_f64() * 1000.0,
-        ason_de_ms: ason_de.as_secs_f64() * 1000.0,
+        asun_de_ms: asun_de.as_secs_f64() * 1000.0,
         bin_de_ms: bin_de.as_secs_f64() * 1000.0,
         json_bytes: json_str.len(),
-        ason_bytes: ason_str.len(),
+        asun_bytes: asun_str.len(),
         bin_bytes: bin_buf.len(),
     }
 }
@@ -519,7 +519,7 @@ fn bench_single_roundtrip(iterations: u32) -> (f64, f64) {
         let s = encode(&user).unwrap();
         let _: User = decode(&s).unwrap();
     }
-    let ason_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let asun_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -528,7 +528,7 @@ fn bench_single_roundtrip(iterations: u32) -> (f64, f64) {
     }
     let json_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    (ason_ms, json_ms)
+    (asun_ms, json_ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +587,7 @@ fn bench_deep_single_roundtrip(iterations: u32) -> (f64, f64) {
         let s = encode(&company).unwrap();
         let _: Company = decode(&s).unwrap();
     }
-    let ason_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let asun_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -596,23 +596,23 @@ fn bench_deep_single_roundtrip(iterations: u32) -> (f64, f64) {
     }
     let json_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    (ason_ms, json_ms)
+    (asun_ms, json_ms)
 }
 
 // ===========================================================================
-// Section 9: Binary Format (ASON-BIN) helpers
+// Section 9: Binary Format (ASUN-BIN) helpers
 // ===========================================================================
 
 struct BinBenchResult {
     name: String,
     json_ser_ms: f64,
-    ason_ser_ms: f64,
+    asun_ser_ms: f64,
     bin_ser_ms: f64,
     json_de_ms: f64,
-    ason_de_ms: f64,
+    asun_de_ms: f64,
     bin_de_ms: f64,
     json_bytes: usize,
-    ason_bytes: usize,
+    asun_bytes: usize,
     bin_bytes: usize,
 }
 
@@ -620,23 +620,23 @@ impl BinBenchResult {
     fn print(&self) {
         println!("  {}", self.name);
         println!(
-            "    Serialize:   JSON {:.2}ms/{}B | ASON {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
+            "    Serialize:   JSON {:.2}ms/{}B | ASUN {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
             self.json_ser_ms,
             self.json_bytes,
-            self.ason_ser_ms,
-            format_ratio(self.json_ser_ms, self.ason_ser_ms),
-            self.ason_bytes,
-            format_percent(self.ason_bytes, self.json_bytes),
+            self.asun_ser_ms,
+            format_ratio(self.json_ser_ms, self.asun_ser_ms),
+            self.asun_bytes,
+            format_percent(self.asun_bytes, self.json_bytes),
             self.bin_ser_ms,
             format_ratio(self.json_ser_ms, self.bin_ser_ms),
             self.bin_bytes,
             format_percent(self.bin_bytes, self.json_bytes),
         );
         println!(
-            "    Deserialize: JSON {:>8.2}ms | ASON {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
+            "    Deserialize: JSON {:>8.2}ms | ASUN {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
             self.json_de_ms,
-            self.ason_de_ms,
-            format_ratio(self.json_de_ms, self.ason_de_ms),
+            self.asun_de_ms,
+            format_ratio(self.json_de_ms, self.asun_de_ms),
             self.bin_de_ms,
             format_ratio(self.json_de_ms, self.bin_de_ms),
         );
@@ -653,12 +653,12 @@ fn bench_flat_bin(count: usize, iterations: u32) -> BinBenchResult {
     }
     let json_ser = start.elapsed();
 
-    let mut ason_str = String::new();
+    let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
-        ason_str = encode(&users).unwrap();
+        asun_str = encode(&users).unwrap();
     }
-    let ason_ser = start.elapsed();
+    let asun_ser = start.elapsed();
 
     let mut bin_buf: Vec<u8> = Vec::new();
     let start = Instant::now();
@@ -675,9 +675,9 @@ fn bench_flat_bin(count: usize, iterations: u32) -> BinBenchResult {
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let _: Vec<User> = decode(&ason_str).unwrap();
+        let _: Vec<User> = decode(&asun_str).unwrap();
     }
-    let ason_de = start.elapsed();
+    let asun_de = start.elapsed();
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -691,13 +691,13 @@ fn bench_flat_bin(count: usize, iterations: u32) -> BinBenchResult {
     BinBenchResult {
         name: format!("Flat struct × {} (8 fields)", count),
         json_ser_ms: json_ser.as_secs_f64() * 1000.0,
-        ason_ser_ms: ason_ser.as_secs_f64() * 1000.0,
+        asun_ser_ms: asun_ser.as_secs_f64() * 1000.0,
         bin_ser_ms: bin_ser.as_secs_f64() * 1000.0,
         json_de_ms: json_de.as_secs_f64() * 1000.0,
-        ason_de_ms: ason_de.as_secs_f64() * 1000.0,
+        asun_de_ms: asun_de.as_secs_f64() * 1000.0,
         bin_de_ms: bin_de.as_secs_f64() * 1000.0,
         json_bytes: json_str.len(),
-        ason_bytes: ason_str.len(),
+        asun_bytes: asun_str.len(),
         bin_bytes: bin_buf.len(),
     }
 }
@@ -712,13 +712,13 @@ fn bench_deep_bin(count: usize, iterations: u32) -> BinBenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASON: serialize vec directly
-    let mut ason_str = String::new();
+    // ASUN: serialize vec directly
+    let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
-        ason_str = encode(&companies).unwrap();
+        asun_str = encode(&companies).unwrap();
     }
-    let ason_ser = start.elapsed();
+    let asun_ser = start.elapsed();
 
     let mut bin_buf: Vec<u8> = Vec::new();
     let start = Instant::now();
@@ -735,9 +735,9 @@ fn bench_deep_bin(count: usize, iterations: u32) -> BinBenchResult {
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let _: Vec<Company> = decode(&ason_str).unwrap();
+        let _: Vec<Company> = decode(&asun_str).unwrap();
     }
-    let ason_de = start.elapsed();
+    let asun_de = start.elapsed();
 
     let start = Instant::now();
     for _ in 0..iterations {
@@ -751,13 +751,13 @@ fn bench_deep_bin(count: usize, iterations: u32) -> BinBenchResult {
     BinBenchResult {
         name: format!("Deep struct × {} (5-level nested)", count),
         json_ser_ms: json_ser.as_secs_f64() * 1000.0,
-        ason_ser_ms: ason_ser.as_secs_f64() * 1000.0,
+        asun_ser_ms: asun_ser.as_secs_f64() * 1000.0,
         bin_ser_ms: bin_ser.as_secs_f64() * 1000.0,
         json_de_ms: json_de.as_secs_f64() * 1000.0,
-        ason_de_ms: ason_de.as_secs_f64() * 1000.0,
+        asun_de_ms: asun_de.as_secs_f64() * 1000.0,
         bin_de_ms: bin_de.as_secs_f64() * 1000.0,
         json_bytes: json_str.len(),
-        ason_bytes: ason_str.len(),
+        asun_bytes: asun_str.len(),
         bin_bytes: bin_buf.len(),
     }
 }
@@ -768,7 +768,7 @@ fn bench_deep_bin(count: usize, iterations: u32) -> BinBenchResult {
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║            ASON vs JSON Comprehensive Benchmark              ║");
+    println!("║            ASUN vs JSON Comprehensive Benchmark              ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
 
     // System info
@@ -844,20 +844,20 @@ fn main() {
     println!("│  Section 4: Single Struct Roundtrip (10000x) │");
     println!("└──────────────────────────────────────────────┘");
 
-    let (ason_flat, json_flat) = bench_single_roundtrip(10000);
+    let (asun_flat, json_flat) = bench_single_roundtrip(10000);
     println!(
-        "  Flat:  ASON {:>6.2}ms | JSON {:>6.2}ms | ratio {:.2}x",
-        ason_flat,
+        "  Flat:  ASUN {:>6.2}ms | JSON {:>6.2}ms | ratio {:.2}x",
+        asun_flat,
         json_flat,
-        json_flat / ason_flat
+        json_flat / asun_flat
     );
 
-    let (ason_deep, json_deep) = bench_deep_single_roundtrip(10000);
+    let (asun_deep, json_deep) = bench_deep_single_roundtrip(10000);
     println!(
-        "  Deep:  ASON {:>6.2}ms | JSON {:>6.2}ms | ratio {:.2}x",
-        ason_deep,
+        "  Deep:  ASUN {:>6.2}ms | JSON {:>6.2}ms | ratio {:.2}x",
+        asun_deep,
         json_deep,
-        json_deep / ason_deep
+        json_deep / asun_deep
     );
 
     // ===================================================================
@@ -888,28 +888,28 @@ fn main() {
     {
         // --- (a) Flat struct vec: 1000 records ---
         let users_1k = generate_users(1000);
-        let ason_untyped = encode(&users_1k).unwrap(); // e.g. {id,name,...}:...
+        let asun_untyped = encode(&users_1k).unwrap(); // e.g. {id,name,...}:...
         // Build typed version by replacing the schema header
-        let ason_typed = ason_untyped.replacen(
+        let asun_typed = asun_untyped.replacen(
             "{id,name,email,age,score,active,role,city}:",
             "{id@int,name@str,email@str,age@int,score@float,active@bool,role@str,city@str}:",
             1,
         );
         // Verify both parse identically
-        let v1: Vec<User> = decode(&ason_untyped).unwrap();
-        let v2: Vec<User> = decode(&ason_typed).unwrap();
+        let v1: Vec<User> = decode(&asun_untyped).unwrap();
+        let v2: Vec<User> = decode(&asun_typed).unwrap();
         assert_eq!(v1, v2, "typed/untyped flat roundtrip mismatch");
 
         let de_iters = 200u32;
         let start = Instant::now();
         for _ in 0..de_iters {
-            let _: Vec<User> = decode(&ason_untyped).unwrap();
+            let _: Vec<User> = decode(&asun_untyped).unwrap();
         }
         let untyped_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let start = Instant::now();
         for _ in 0..de_iters {
-            let _: Vec<User> = decode(&ason_typed).unwrap();
+            let _: Vec<User> = decode(&asun_typed).unwrap();
         }
         let typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -918,44 +918,44 @@ fn main() {
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             untyped_ms,
-            ason_untyped.len()
+            asun_untyped.len()
         );
         println!(
             "    Annotated:   {:>8.2}ms  ({} B)",
             typed_ms,
-            ason_typed.len()
+            asun_typed.len()
         );
         println!("    Ratio: {:.3}x (unannotated / annotated)", ratio);
         println!(
             "    Schema overhead: +{} bytes ({:.1}%)",
-            ason_typed.len() - ason_untyped.len(),
-            (ason_typed.len() as f64 / ason_untyped.len() as f64 - 1.0) * 100.0
+            asun_typed.len() - asun_untyped.len(),
+            (asun_typed.len() as f64 / asun_untyped.len() as f64 - 1.0) * 100.0
         );
         println!();
 
         // --- (b) Deep nested single struct ---
         let company = &generate_companies(1)[0];
-        let ason_deep_untyped = encode(company).unwrap();
-        let ason_deep_typed = ason_deep_untyped.replacen(
+        let asun_deep_untyped = encode(company).unwrap();
+        let asun_deep_typed = asun_deep_untyped.replacen(
             "{name,founded,revenue_m,public,divisions,tags}:",
             "{name@str,founded@int,revenue_m@float,public@bool,divisions,tags}:",
             1,
         );
 
-        let c1: Company = decode(&ason_deep_untyped).unwrap();
-        let c2: Company = decode(&ason_deep_typed).unwrap();
+        let c1: Company = decode(&asun_deep_untyped).unwrap();
+        let c2: Company = decode(&asun_deep_typed).unwrap();
         assert_eq!(c1, c2, "typed/untyped deep roundtrip mismatch");
 
         let deep_iters = 5000u32;
         let start = Instant::now();
         for _ in 0..deep_iters {
-            let _: Company = decode(&ason_deep_untyped).unwrap();
+            let _: Company = decode(&asun_deep_untyped).unwrap();
         }
         let deep_untyped_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let start = Instant::now();
         for _ in 0..deep_iters {
-            let _: Company = decode(&ason_deep_typed).unwrap();
+            let _: Company = decode(&asun_deep_typed).unwrap();
         }
         let deep_typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -964,44 +964,44 @@ fn main() {
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             deep_untyped_ms,
-            ason_deep_untyped.len()
+            asun_deep_untyped.len()
         );
         println!(
             "    Annotated:   {:>8.2}ms  ({} B)",
             deep_typed_ms,
-            ason_deep_typed.len()
+            asun_deep_typed.len()
         );
         println!("    Ratio: {:.3}x (unannotated / annotated)", deep_ratio);
         println!(
             "    Schema overhead: +{} bytes ({:.1}%)",
-            ason_deep_typed.len() - ason_deep_untyped.len(),
-            (ason_deep_typed.len() as f64 / ason_deep_untyped.len() as f64 - 1.0) * 100.0
+            asun_deep_typed.len() - asun_deep_untyped.len(),
+            (asun_deep_typed.len() as f64 / asun_deep_untyped.len() as f64 - 1.0) * 100.0
         );
         println!();
 
         // --- (c) All-types single struct ---
         let at = &generate_all_types(1)[0];
-        let ason_at_untyped = encode(at).unwrap();
-        let ason_at_typed = ason_at_untyped.replacen(
+        let asun_at_untyped = encode(at).unwrap();
+        let asun_at_typed = asun_at_untyped.replacen(
             "{b,i8v,i16v,i32v,i64v,u8v,u16v,u32v,u64v,f32v,f64v,s,opt_some,opt_none,vec_int,vec_str}:",
             "{b@bool,i8v@int,i16v@int,i32v@int,i64v@int,u8v@int,u16v@int,u32v@int,u64v@int,f32v@float,f64v@float,s@str,opt_some@int,opt_none@int,vec_int@[int],vec_str@[str]}:",
             1,
         );
 
-        let a1: AllTypes = decode(&ason_at_untyped).unwrap();
-        let a2: AllTypes = decode(&ason_at_typed).unwrap();
+        let a1: AllTypes = decode(&asun_at_untyped).unwrap();
+        let a2: AllTypes = decode(&asun_at_typed).unwrap();
         assert_eq!(a1, a2, "typed/untyped all-types roundtrip mismatch");
 
         let at_iters = 10000u32;
         let start = Instant::now();
         for _ in 0..at_iters {
-            let _: AllTypes = decode(&ason_at_untyped).unwrap();
+            let _: AllTypes = decode(&asun_at_untyped).unwrap();
         }
         let at_untyped_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let start = Instant::now();
         for _ in 0..at_iters {
-            let _: AllTypes = decode(&ason_at_typed).unwrap();
+            let _: AllTypes = decode(&asun_at_typed).unwrap();
         }
         let at_typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1010,18 +1010,18 @@ fn main() {
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             at_untyped_ms,
-            ason_at_untyped.len()
+            asun_at_untyped.len()
         );
         println!(
             "    Annotated:   {:>8.2}ms  ({} B)",
             at_typed_ms,
-            ason_at_typed.len()
+            asun_at_typed.len()
         );
         println!("    Ratio: {:.3}x (unannotated / annotated)", at_ratio);
         println!(
             "    Schema overhead: +{} bytes ({:.1}%)",
-            ason_at_typed.len() - ason_at_untyped.len(),
-            (ason_at_typed.len() as f64 / ason_at_untyped.len() as f64 - 1.0) * 100.0
+            asun_at_typed.len() - asun_at_untyped.len(),
+            (asun_at_typed.len() as f64 / asun_at_untyped.len() as f64 - 1.0) * 100.0
         );
 
         println!();
@@ -1170,7 +1170,7 @@ fn main() {
     // Measure raw throughput: 1000 records × 100 iterations
     let users_1k = generate_users(1000);
     let json_1k = serde_json::to_string(&users_1k).unwrap();
-    let ason_1k = encode(&users_1k).unwrap();
+    let asun_1k = encode(&users_1k).unwrap();
 
     let iters = 100u32;
 
@@ -1184,7 +1184,7 @@ fn main() {
     for _ in 0..iters {
         let _ = encode(&users_1k).unwrap();
     }
-    let ason_ser_dur = start.elapsed();
+    let asun_ser_dur = start.elapsed();
 
     let start = Instant::now();
     for _ in 0..iters {
@@ -1194,24 +1194,24 @@ fn main() {
 
     let start = Instant::now();
     for _ in 0..iters {
-        let _: Vec<User> = decode(&ason_1k).unwrap();
+        let _: Vec<User> = decode(&asun_1k).unwrap();
     }
-    let ason_de_dur = start.elapsed();
+    let asun_de_dur = start.elapsed();
 
     let total_records = 1000.0 * iters as f64;
     let json_ser_rps = total_records / json_ser_dur.as_secs_f64();
-    let ason_ser_rps = total_records / ason_ser_dur.as_secs_f64();
+    let asun_ser_rps = total_records / asun_ser_dur.as_secs_f64();
     let json_de_rps = total_records / json_de_dur.as_secs_f64();
-    let ason_de_rps = total_records / ason_de_dur.as_secs_f64();
+    let asun_de_rps = total_records / asun_de_dur.as_secs_f64();
 
     let json_ser_mbps =
         (json_1k.len() as f64 * iters as f64) / json_ser_dur.as_secs_f64() / 1_048_576.0;
-    let ason_ser_mbps =
-        (ason_1k.len() as f64 * iters as f64) / ason_ser_dur.as_secs_f64() / 1_048_576.0;
+    let asun_ser_mbps =
+        (asun_1k.len() as f64 * iters as f64) / asun_ser_dur.as_secs_f64() / 1_048_576.0;
     let json_de_mbps =
         (json_1k.len() as f64 * iters as f64) / json_de_dur.as_secs_f64() / 1_048_576.0;
-    let ason_de_mbps =
-        (ason_1k.len() as f64 * iters as f64) / ason_de_dur.as_secs_f64() / 1_048_576.0;
+    let asun_de_mbps =
+        (asun_1k.len() as f64 * iters as f64) / asun_de_dur.as_secs_f64() / 1_048_576.0;
 
     println!("  Serialize throughput (1000 records × {iters} iters):");
     println!(
@@ -1219,14 +1219,14 @@ fn main() {
         json_ser_rps, json_ser_mbps
     );
     println!(
-        "    ASON: {:.0} records/s  ({:.1} MB/s of ASON)",
-        ason_ser_rps, ason_ser_mbps
+        "    ASUN: {:.0} records/s  ({:.1} MB/s of ASUN)",
+        asun_ser_rps, asun_ser_mbps
     );
     println!(
         "    Speed: {:.2}x {}",
-        ason_ser_rps / json_ser_rps,
-        if ason_ser_rps > json_ser_rps {
-            "✓ ASON faster"
+        asun_ser_rps / json_ser_rps,
+        if asun_ser_rps > json_ser_rps {
+            "✓ ASUN faster"
         } else {
             ""
         }
@@ -1237,14 +1237,14 @@ fn main() {
         json_de_rps, json_de_mbps
     );
     println!(
-        "    ASON: {:.0} records/s  ({:.1} MB/s)",
-        ason_de_rps, ason_de_mbps
+        "    ASUN: {:.0} records/s  ({:.1} MB/s)",
+        asun_de_rps, asun_de_mbps
     );
     println!(
         "    Speed: {:.2}x {}",
-        ason_de_rps / json_de_rps,
-        if ason_de_rps > json_de_rps {
-            "✓ ASON faster"
+        asun_de_rps / json_de_rps,
+        if asun_de_rps > json_de_rps {
+            "✓ ASUN faster"
         } else {
             ""
         }
@@ -1261,10 +1261,10 @@ fn main() {
     );
 
     // ===================================================================
-    // Section 9: Binary Format (ASON-BIN)
+    // Section 9: Binary Format (ASUN-BIN)
     // ===================================================================
     println!("\n┌──────────────────────────────────────────────────────────────┐");
-    println!("│  Section 9: Binary Format (ASON-BIN) vs ASON text vs JSON    │");
+    println!("│  Section 9: Binary Format (ASUN-BIN) vs ASUN text vs JSON    │");
     println!("└──────────────────────────────────────────────────────────────┘");
 
     println!("\n  ── Flat struct ──");
@@ -1303,7 +1303,7 @@ fn main() {
             let s = encode(&user).unwrap();
             let _: User = decode(&s).unwrap();
         }
-        let ason_ns = start.elapsed().as_nanos() as f64 / iters as f64;
+        let asun_ns = start.elapsed().as_nanos() as f64 / iters as f64;
 
         let start = Instant::now();
         for _ in 0..iters {
@@ -1313,13 +1313,13 @@ fn main() {
         let json_ns = start.elapsed().as_nanos() as f64 / iters as f64;
 
         println!(
-            "    × {}: BIN {:>6.0}ns | ASON {:>6.0}ns | JSON {:>6.0}ns",
-            iters, bin_ns, ason_ns, json_ns
+            "    × {}: BIN {:>6.0}ns | ASUN {:>6.0}ns | JSON {:>6.0}ns",
+            iters, bin_ns, asun_ns, json_ns
         );
         println!(
-            "    Speedup vs JSON: BIN {:.1}x faster | ASON {:.1}x faster",
+            "    Speedup vs JSON: BIN {:.1}x faster | ASUN {:.1}x faster",
             json_ns / bin_ns,
-            json_ns / ason_ns
+            json_ns / asun_ns
         );
     }
 
