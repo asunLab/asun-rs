@@ -259,7 +259,7 @@ impl BenchResult {
     fn print(&self) {
         println!("  {}", self.name);
         println!(
-            "    Serialize:   JSON {:.2}ms/{}B | ASUN {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
+            "    Encode:      JSON {:.2}ms/{}B | ASUN {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
             self.json_ser_ms,
             self.json_bytes,
             self.asun_ser_ms,
@@ -272,7 +272,7 @@ impl BenchResult {
             format_percent(self.bin_bytes, self.json_bytes),
         );
         println!(
-            "    Deserialize: JSON {:>8.2}ms | ASUN {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
+            "    Decode:      JSON {:>8.2}ms | ASUN {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
             self.json_de_ms,
             self.asun_de_ms,
             format_ratio(self.json_de_ms, self.asun_de_ms),
@@ -289,7 +289,7 @@ impl BenchResult {
 fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     let users = generate_users(count);
 
-    // JSON serialize
+    // JSON encode
     let mut json_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
@@ -297,7 +297,7 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASUN serialize
+    // ASUN encode
     let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
@@ -312,14 +312,14 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
     }
     let bin_ser = start.elapsed();
 
-    // JSON deserialize
+    // JSON decode
     let start = Instant::now();
     for _ in 0..iterations {
         let _: Vec<User> = serde_json::from_str(&json_str).unwrap();
     }
     let json_de = start.elapsed();
 
-    // ASUN deserialize
+    // ASUN decode
     let start = Instant::now();
     for _ in 0..iterations {
         let _: Vec<User> = decode(&asun_str).unwrap();
@@ -366,7 +366,7 @@ fn bench_all_types(count: usize, iterations: u32) -> BenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASUN: serialize vec directly
+    // ASUN: encode vec directly
     let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
@@ -387,7 +387,7 @@ fn bench_all_types(count: usize, iterations: u32) -> BenchResult {
     }
     let json_de = start.elapsed();
 
-    // ASUN: deserialize vec directly
+    // ASUN: decode vec directly
     let start = Instant::now();
     for _ in 0..iterations {
         let _: Vec<AllTypes> = decode(&asun_str).unwrap();
@@ -438,7 +438,7 @@ fn bench_deep(count: usize, iterations: u32) -> BenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASUN: serialize vec directly
+    // ASUN: encode vec directly
     let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
@@ -620,7 +620,7 @@ impl BinBenchResult {
     fn print(&self) {
         println!("  {}", self.name);
         println!(
-            "    Serialize:   JSON {:.2}ms/{}B | ASUN {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
+            "    Encode:      JSON {:.2}ms/{}B | ASUN {:.2}ms({})/{}B({}) | BIN {:.2}ms({})/{}B({})",
             self.json_ser_ms,
             self.json_bytes,
             self.asun_ser_ms,
@@ -633,7 +633,7 @@ impl BinBenchResult {
             format_percent(self.bin_bytes, self.json_bytes),
         );
         println!(
-            "    Deserialize: JSON {:>8.2}ms | ASUN {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
+            "    Decode:      JSON {:>8.2}ms | ASUN {:>8.2}ms ({}) | BIN {:>8.2}ms ({})",
             self.json_de_ms,
             self.asun_de_ms,
             format_ratio(self.json_de_ms, self.asun_de_ms),
@@ -712,7 +712,7 @@ fn bench_deep_bin(count: usize, iterations: u32) -> BinBenchResult {
     }
     let json_ser = start.elapsed();
 
-    // ASUN: serialize vec directly
+    // ASUN: encode vec directly
     let mut asun_str = String::new();
     let start = Instant::now();
     for _ in 0..iterations {
@@ -785,7 +785,7 @@ fn main() {
     println!("Iterations per test: {}", iterations);
 
     // ===================================================================
-    // Section 1: Flat struct (schema-driven vec serialization)
+    // Section 1: Flat struct (schema-driven vec encoding)
     // ===================================================================
     println!("\n┌─────────────────────────────────────────────┐");
     println!("│  Section 1: Flat Struct (schema-driven vec) │");
@@ -879,10 +879,10 @@ fn main() {
     );
 
     // ===================================================================
-    // Section 6: Annotated vs Unannotated Schema Deserialization
+    // Section 6: Annotated vs Unannotated Schema Decoding
     // ===================================================================
     println!("\n┌──────────────────────────────────────────────────────────────┐");
-    println!("│  Section 6: Annotated vs Unannotated Schema (deserialize)    │");
+    println!("│  Section 6: Annotated vs Unannotated Schema (decode)          │");
     println!("└──────────────────────────────────────────────────────────────┘");
 
     {
@@ -914,7 +914,7 @@ fn main() {
         let typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let ratio = untyped_ms / typed_ms;
-        println!("  Flat struct × 1000 ({de_iters} iters, deserialize only)");
+        println!("  Flat struct × 1000 ({de_iters} iters, decode only)");
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             untyped_ms,
@@ -960,7 +960,7 @@ fn main() {
         let deep_typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let deep_ratio = deep_untyped_ms / deep_typed_ms;
-        println!("  5-level deep single struct ({deep_iters} iters, deserialize only)");
+        println!("  5-level deep single struct ({deep_iters} iters, decode only)");
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             deep_untyped_ms,
@@ -1006,7 +1006,7 @@ fn main() {
         let at_typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let at_ratio = at_untyped_ms / at_typed_ms;
-        println!("  All-types single struct ({at_iters} iters, deserialize only)");
+        println!("  All-types single struct ({at_iters} iters, decode only)");
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             at_untyped_ms,
@@ -1026,14 +1026,14 @@ fn main() {
 
         println!();
         println!("  Summary: Type annotations add a small schema parsing cost but");
-        println!("  are negligible in overall deserialization. Both produce identical results.");
+        println!("  are negligible in overall decoding. Both produce identical results.");
     }
 
     // ===================================================================
-    // Section 7: Annotated vs Unannotated Schema Serialization
+    // Section 7: Annotated vs Unannotated Schema Encoding
     // ===================================================================
     println!("\n┌──────────────────────────────────────────────────────────────┐");
-    println!("│  Section 7: Annotated vs Unannotated Schema (serialize)      │");
+    println!("│  Section 7: Annotated vs Unannotated Schema (encode)          │");
     println!("└──────────────────────────────────────────────────────────────┘");
 
     {
@@ -1055,13 +1055,13 @@ fn main() {
         }
         let typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Verify both deserialize to the same result
+        // Verify both decode to the same result
         let v1: Vec<User> = decode(&untyped_out).unwrap();
         let v2: Vec<User> = decode(&typed_out).unwrap();
-        assert_eq!(v1, v2, "typed/untyped flat serialize mismatch");
+        assert_eq!(v1, v2, "typed/untyped flat encode mismatch");
 
         let ratio = untyped_ms / typed_ms;
-        println!("  Flat struct × 1000 vec ({ser_iters} iters, serialize only)");
+        println!("  Flat struct × 1000 vec ({ser_iters} iters, encode only)");
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             untyped_ms,
@@ -1099,7 +1099,7 @@ fn main() {
         let single_typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let single_ratio = single_untyped_ms / single_typed_ms;
-        println!("  Single flat struct ({single_iters} iters, serialize only)");
+        println!("  Single flat struct ({single_iters} iters, encode only)");
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             single_untyped_ms,
@@ -1132,7 +1132,7 @@ fn main() {
         let deep_typed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let deep_ratio = deep_untyped_ms / deep_typed_ms;
-        println!("  5-level deep single struct ({deep_iters} iters, serialize only)");
+        println!("  5-level deep single struct ({deep_iters} iters, encode only)");
         println!(
             "    Unannotated: {:>8.2}ms  ({} B)",
             deep_untyped_ms,
@@ -1153,10 +1153,10 @@ fn main() {
         // Verify roundtrip
         let c1: Company = decode(&deep_untyped).unwrap();
         let c2: Company = decode(&deep_typed).unwrap();
-        assert_eq!(c1, c2, "typed/untyped deep serialize mismatch");
+        assert_eq!(c1, c2, "typed/untyped deep encode mismatch");
 
         println!();
-        println!("  Summary: Typed serialization has minimal overhead. The extra cost");
+        println!("  Summary: Typed encoding has minimal overhead. The extra cost");
         println!("  is recording and emitting type hints in the schema header.");
     }
 
@@ -1213,7 +1213,7 @@ fn main() {
     let asun_de_mbps =
         (asun_1k.len() as f64 * iters as f64) / asun_de_dur.as_secs_f64() / 1_048_576.0;
 
-    println!("  Serialize throughput (1000 records × {iters} iters):");
+    println!("  Encode throughput (1000 records × {iters} iters):");
     println!(
         "    JSON: {:.0} records/s  ({:.1} MB/s of JSON)",
         json_ser_rps, json_ser_mbps
@@ -1231,7 +1231,7 @@ fn main() {
             ""
         }
     );
-    println!("  Deserialize throughput:");
+    println!("  Decode throughput:");
     println!(
         "    JSON: {:.0} records/s  ({:.1} MB/s)",
         json_de_rps, json_de_mbps

@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 // Public API
 // ============================================================================
 
-/// Serialize `value` to a `Vec<u8>` using the ASUN binary format.
+/// Encode `value` to a `Vec<u8>` using the ASUN binary format.
 ///
 /// # Example
 /// ```rust,ignore
@@ -60,14 +60,14 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[inline]
 pub fn encode_binary<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let mut ser = BinarySerializer::with_capacity(256);
+    let mut ser = BinaryEncoder::with_capacity(256);
     value.serialize(&mut ser)?;
     Ok(ser.buf)
 }
 
-/// Deserialize a value from ASUN binary bytes.
+/// Decode a value from ASUN binary bytes.
 ///
-/// The lifetime `'de` allows **zero-copy** deserialization: any `&'de str` fields
+/// The lifetime `'de` allows **zero-copy** decoding: any `&'de str` fields
 /// in the target type will borrow directly from `data` with no allocation.
 ///
 /// # Example
@@ -76,20 +76,20 @@ pub fn encode_binary<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 /// ```
 #[inline]
 pub fn decode_binary<'de, T: Deserialize<'de>>(data: &'de [u8]) -> Result<T> {
-    let mut de = BinaryDeserializer::new(data);
+    let mut de = BinaryDecoder::new(data);
     let v = T::deserialize(&mut de)?;
     Ok(v)
 }
 
 // ============================================================================
-// BinarySerializer
+// BinaryEncoder
 // ============================================================================
 
-pub struct BinarySerializer {
+pub struct BinaryEncoder {
     pub(crate) buf: Vec<u8>,
 }
 
-impl BinarySerializer {
+impl BinaryEncoder {
     #[inline]
     pub fn new() -> Self {
         Self { buf: Vec::new() }
@@ -177,17 +177,17 @@ impl BinarySerializer {
 // serde::Serializer impl
 // ============================================================================
 
-impl<'a> ser::Serializer for &'a mut BinarySerializer {
+impl<'a> ser::Serializer for &'a mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = BinSeqSer<'a>;
-    type SerializeTuple = &'a mut BinarySerializer;
-    type SerializeTupleStruct = &'a mut BinarySerializer;
-    type SerializeTupleVariant = &'a mut BinarySerializer;
+    type SerializeSeq = BinSeqEnc<'a>;
+    type SerializeTuple = &'a mut BinaryEncoder;
+    type SerializeTupleStruct = &'a mut BinaryEncoder;
+    type SerializeTupleVariant = &'a mut BinaryEncoder;
     type SerializeMap = ser::Impossible<(), Error>;
-    type SerializeStruct = &'a mut BinarySerializer;
-    type SerializeStructVariant = &'a mut BinarySerializer;
+    type SerializeStruct = &'a mut BinaryEncoder;
+    type SerializeStructVariant = &'a mut BinaryEncoder;
 
     #[inline]
     fn serialize_bool(self, v: bool) -> Result<()> {
@@ -330,12 +330,12 @@ impl<'a> ser::Serializer for &'a mut BinarySerializer {
     }
 
     /// Sequence: write placeholder u32 count (fixed up in `end()`).
-    fn serialize_seq(self, len: Option<usize>) -> Result<BinSeqSer<'a>> {
-        Ok(BinSeqSer::new(self, len))
+    fn serialize_seq(self, len: Option<usize>) -> Result<BinSeqEnc<'a>> {
+        Ok(BinSeqEnc::new(self, len))
     }
 
     /// Tuple: known length, no prefix needed.
-    fn serialize_tuple(self, _len: usize) -> Result<&'a mut BinarySerializer> {
+    fn serialize_tuple(self, _len: usize) -> Result<&'a mut BinaryEncoder> {
         Ok(self)
     }
 
@@ -343,7 +343,7 @@ impl<'a> ser::Serializer for &'a mut BinarySerializer {
         self,
         _name: &'static str,
         _len: usize,
-    ) -> Result<&'a mut BinarySerializer> {
+    ) -> Result<&'a mut BinaryEncoder> {
         Ok(self)
     }
 
@@ -353,7 +353,7 @@ impl<'a> ser::Serializer for &'a mut BinarySerializer {
         variant_index: u32,
         _variant: &'static str,
         _len: usize,
-    ) -> Result<&'a mut BinarySerializer> {
+    ) -> Result<&'a mut BinaryEncoder> {
         self.write_u32(variant_index);
         Ok(self)
     }
@@ -370,7 +370,7 @@ impl<'a> ser::Serializer for &'a mut BinarySerializer {
         self,
         _name: &'static str,
         _len: usize,
-    ) -> Result<&'a mut BinarySerializer> {
+    ) -> Result<&'a mut BinaryEncoder> {
         Ok(self)
     }
 
@@ -380,7 +380,7 @@ impl<'a> ser::Serializer for &'a mut BinarySerializer {
         variant_index: u32,
         _variant: &'static str,
         _len: usize,
-    ) -> Result<&'a mut BinarySerializer> {
+    ) -> Result<&'a mut BinaryEncoder> {
         self.write_u32(variant_index);
         Ok(self)
     }
@@ -391,24 +391,24 @@ impl<'a> ser::Serializer for &'a mut BinarySerializer {
 }
 
 // ============================================================================
-// BinSeqSer — handles sequences with unknown-at-call-time lengths
+// BinSeqEnc — handles sequences with unknown-at-call-time lengths
 // ============================================================================
 
-pub struct BinSeqSer<'a> {
-    ser: &'a mut BinarySerializer,
+pub struct BinSeqEnc<'a> {
+    enc: &'a mut BinaryEncoder,
     /// Byte position in `buf` where the `u32` count placeholder lives.
     len_pos: usize,
     count: u32,
 }
 
-impl<'a> BinSeqSer<'a> {
-    fn new(ser: &'a mut BinarySerializer, known_len: Option<usize>) -> Self {
-        let len_pos = ser.buf.len();
+impl<'a> BinSeqEnc<'a> {
+    fn new(enc: &'a mut BinaryEncoder, known_len: Option<usize>) -> Self {
+        let len_pos = enc.buf.len();
         // Write placeholder — will be fixed up in end()
         let count = known_len.unwrap_or(0) as u32;
-        ser.write_u32(count);
-        BinSeqSer {
-            ser,
+        enc.write_u32(count);
+        BinSeqEnc {
+            enc,
             len_pos,
             count: 0,
         }
@@ -417,18 +417,18 @@ impl<'a> BinSeqSer<'a> {
     #[inline(always)]
     fn fix_len(&mut self) {
         let bytes = self.count.to_le_bytes();
-        self.ser.buf[self.len_pos..self.len_pos + 4].copy_from_slice(&bytes);
+        self.enc.buf[self.len_pos..self.len_pos + 4].copy_from_slice(&bytes);
     }
 }
 
-impl<'a> SerializeSeq for BinSeqSer<'a> {
+impl<'a> SerializeSeq for BinSeqEnc<'a> {
     type Ok = ();
     type Error = Error;
 
     #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         self.count += 1;
-        value.serialize(&mut *self.ser)
+        value.serialize(&mut *self.enc)
     }
 
     #[inline]
@@ -438,7 +438,7 @@ impl<'a> SerializeSeq for BinSeqSer<'a> {
     }
 }
 
-impl<'a> SerializeTupleVariant for &'a mut BinarySerializer {
+impl<'a> SerializeTupleVariant for &'a mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -454,10 +454,10 @@ impl<'a> SerializeTupleVariant for &'a mut BinarySerializer {
 }
 
 // ============================================================================
-// Tuple / Struct — use &mut BinarySerializer directly (no count prefix)
+// Tuple / Struct — use &mut BinaryEncoder directly (no count prefix)
 // ============================================================================
 
-impl<'a> SerializeTuple for &'a mut BinarySerializer {
+impl<'a> SerializeTuple for &'a mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -472,7 +472,7 @@ impl<'a> SerializeTuple for &'a mut BinarySerializer {
     }
 }
 
-impl<'a> SerializeTupleStruct for &'a mut BinarySerializer {
+impl<'a> SerializeTupleStruct for &'a mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -487,7 +487,7 @@ impl<'a> SerializeTupleStruct for &'a mut BinarySerializer {
     }
 }
 
-impl<'a> SerializeStruct for &'a mut BinarySerializer {
+impl<'a> SerializeStruct for &'a mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -506,7 +506,7 @@ impl<'a> SerializeStruct for &'a mut BinarySerializer {
     }
 }
 
-impl<'a> SerializeStructVariant for &'a mut BinarySerializer {
+impl<'a> SerializeStructVariant for &'a mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -526,15 +526,15 @@ impl<'a> SerializeStructVariant for &'a mut BinarySerializer {
 }
 
 // ============================================================================
-// BinaryDeserializer
+// BinaryDecoder
 // ============================================================================
 
-pub struct BinaryDeserializer<'de> {
+pub struct BinaryDecoder<'de> {
     data: &'de [u8],
     pos: usize,
 }
 
-impl<'de> BinaryDeserializer<'de> {
+impl<'de> BinaryDecoder<'de> {
     #[inline]
     pub fn new(data: &'de [u8]) -> Self {
         Self { data, pos: 0 }
@@ -657,7 +657,7 @@ impl<'de> BinaryDeserializer<'de> {
 // serde::Deserializer impl
 // ============================================================================
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDeserializer<'de> {
+impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
     type Error = Error;
 
     /// Binary format is NOT self-describing — type tags are absent.
@@ -857,13 +857,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDeserializer<'de> {
 // ============================================================================
 
 struct BinSeqAccess<'a, 'de: 'a> {
-    de: &'a mut BinaryDeserializer<'de>,
+    de: &'a mut BinaryDecoder<'de>,
     remaining: usize,
 }
 
 impl<'a, 'de> BinSeqAccess<'a, 'de> {
     #[inline]
-    fn new(de: &'a mut BinaryDeserializer<'de>, remaining: usize) -> Self {
+    fn new(de: &'a mut BinaryDecoder<'de>, remaining: usize) -> Self {
         Self { de, remaining }
     }
 }
@@ -891,7 +891,7 @@ impl<'de, 'a> SeqAccess<'de> for BinSeqAccess<'a, 'de> {
 // ============================================================================
 
 struct BinEnumAccess<'a, 'de: 'a> {
-    de: &'a mut BinaryDeserializer<'de>,
+    de: &'a mut BinaryDecoder<'de>,
 }
 
 impl<'de, 'a> EnumAccess<'de> for BinEnumAccess<'a, 'de> {
@@ -910,7 +910,7 @@ impl<'de, 'a> EnumAccess<'de> for BinEnumAccess<'a, 'de> {
 }
 
 struct BinVariantAccess<'a, 'de: 'a> {
-    de: &'a mut BinaryDeserializer<'de>,
+    de: &'a mut BinaryDecoder<'de>,
 }
 
 impl<'de, 'a> VariantAccess<'de> for BinVariantAccess<'a, 'de> {
@@ -942,8 +942,8 @@ impl<'de, 'a> VariantAccess<'de> for BinVariantAccess<'a, 'de> {
 // ============================================================================
 
 const _: () = {
-    // BinaryDeserializer: &[u8] (2 usize fat ptr) + usize pos = 3 usize
-    assert!(mem::size_of::<BinaryDeserializer<'_>>() == 3 * mem::size_of::<usize>());
+    // BinaryDecoder: &[u8] (2 usize fat ptr) + usize pos = 3 usize
+    assert!(mem::size_of::<BinaryDecoder<'_>>() == 3 * mem::size_of::<usize>());
 };
 
 #[cfg(test)]
