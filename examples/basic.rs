@@ -11,29 +11,29 @@ struct User {
 fn main() {
     println!("=== ASUN Basic Examples ===\n");
 
-    // 1. Serialize a single struct
+    // 1. Encode a single struct
     let user = User {
         id: 1,
         name: "Alice".into(),
         active: true,
     };
     let asun_str = encode(&user).unwrap();
-    println!("Serialize single struct:");
+    println!("Encode single struct:");
     println!("  {}\n", asun_str);
 
-    // 2. Serialize with type annotations (encode_typed)
+    // 2. Encode with type annotations (encode_typed)
     let typed_str = encode_typed(&user).unwrap();
-    println!("Serialize with type annotations:");
+    println!("Encode with type annotations:");
     println!("  {}\n", typed_str);
     assert!(typed_str.starts_with("{id@int,name@str,active@bool}:"));
 
-    // 3. Deserialize from ASUN (accepts both annotated and unannotated)
+    // 3. Decode from ASUN (accepts both annotated and unannotated)
     let input = "{id@int,name@str,active@bool}:(1,Alice,true)";
     let user: User = decode(input).unwrap();
-    println!("Deserialize single struct:");
+    println!("Decode single struct:");
     println!("  {:?}\n", user);
 
-    // 4. Serialize a vec of structs (schema-driven)
+    // 4. Encode a vec of structs (schema-driven)
     let users = vec![
         User {
             id: 1,
@@ -52,20 +52,20 @@ fn main() {
         },
     ];
     let asun_vec = encode(&users).unwrap();
-    println!("Serialize vec (schema-driven):");
+    println!("Encode vec (schema-driven):");
     println!("  {}\n", asun_vec);
 
-    // 5. Serialize vec with type annotations (encode_typed)
+    // 5. Encode vec with type annotations (encode_typed)
     let typed_vec = encode_typed(&users).unwrap();
-    println!("Serialize vec with type annotations:");
+    println!("Encode vec with type annotations:");
     println!("  {}\n", typed_vec);
     assert!(typed_vec.starts_with("[{id@int,name@str,active@bool}]:"));
 
-    // 6. Deserialize vec
+    // 6. Decode vec
     let input =
         "[{id@int,name@str,active@bool}]:(1,Alice,true),(2,Bob,false),(3,\"Carol Smith\",true)";
     let users: Vec<User> = decode(input).unwrap();
-    println!("Deserialize vec:");
+    println!("Decode vec:");
     for u in &users {
         println!("  {:?}", u);
     }
