@@ -4,9 +4,9 @@
 [![Documentation](https://docs.rs/asun/badge.svg)](https://docs.rs/asun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Rust support for [ASUN](https://github.com/asun-lab/asun), a schema-driven format for compact structured data with serde-based encoding and decoding.
+Rust support for [ASUN](https://github.com/asunLab/asun), a schema-driven format for compact structured data with serde-based encoding and decoding.
 
-[中文文档](README_CN.md)
+[中文文档](https://github.com/asunLab/asun-rs/blob/main/README_CN.md)
 
 ## Why ASUN
 
@@ -19,8 +19,10 @@ ASUN writes schema once and keeps each row positional:
 ]
 ```
 
-```text
-[{id@int,name@str,active@bool}]:(1,Alice,true),(2,Bob,false)
+```asun
+[{id,name,active}]:
+    (1,Alice,true),
+    (2,Bob,false)
 ```
 
 That makes repeated records shorter and easier to transport or feed into models.

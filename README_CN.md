@@ -4,9 +4,9 @@
 [![Documentation](https://docs.rs/asun/badge.svg)](https://docs.rs/asun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-面向 [ASUN](https://github.com/asun-lab/asun) 的 Rust 实现，基于 serde 提供紧凑结构化数据的编码与解码。
+面向 [ASUN](https://github.com/asunLab/asun) 的 Rust 实现，基于 serde 提供紧凑结构化数据的编码与解码。
 
-[English](README.md)
+[English](https://github.com/asunLab/asun-rs/blob/main/README.md)
 
 ## 为什么用 ASUN
 
@@ -19,8 +19,10 @@ ASUN 只写一次 Schema，后续每行数据按位置保存：
 ]
 ```
 
-```text
-[{id@int,name@str,active@bool}]:(1,Alice,true),(2,Bob,false)
+```asun
+[{id,name,active}]:
+    (1,Alice,true),
+    (2,Bob,false)
 ```
 
 这让重复记录更短，更适合传输、存储或送入模型。
