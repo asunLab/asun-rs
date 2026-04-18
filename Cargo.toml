@@ -1,6 +1,6 @@
 [package]
 name = "asun"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Athan Xiao <athanxiao@gmail.com>"]
 edition = "2024"
 description = "ASUN (Array-Schema Unified Notation) - A high-performance, token-efficient serde data format with schema-data separation"
