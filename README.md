@@ -8,24 +8,34 @@ Rust support for [ASUN](https://github.com/asunLab/asun), a schema-driven format
 
 [中文文档](https://github.com/asunLab/asun-rs/blob/main/README_CN.md)
 
-## Why ASUN
+## Why ASUN?
 
-ASUN writes schema once and keeps each row positional:
+**json**
+
+Standard JSON repeats every field name in every record. When you send structured data to an LLM, over an API, or across services, that repetition wastes tokens, bytes, and attention:
 
 ```json
 [
   { "id": 1, "name": "Alice", "active": true },
-  { "id": 2, "name": "Bob", "active": false }
+  { "id": 2, "name": "Bob", "active": false },
+  { "id": 3, "name": "Carol", "active": true }
 ]
 ```
 
+**asun**
+
+ASUN declares the schema **once** and streams data as compact tuples:
+
 ```asun
-[{id,name,active}]:
-    (1,Alice,true),
-    (2,Bob,false)
+[{id, name, active}]:
+  (1,Alice,true),
+  (2,Bob,false),
+  (3,Carol,true)
 ```
 
-That makes repeated records shorter and easier to transport or feed into models.
+**Fewer tokens. Smaller payloads. Clearer structure, and faster parsing than repeated-object JSON.**
+
+---
 
 ## Highlights
 
@@ -39,7 +49,7 @@ That makes repeated records shorter and easier to transport or feed into models.
 
 ```toml
 [dependencies]
-asun = "0.1"
+asun = "*"
 serde = { version = "1", features = ["derive"] }
 ```
 

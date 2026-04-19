@@ -19,6 +19,9 @@ ASUN 只写一次 Schema，后续每行数据按位置保存：
 ]
 ```
 
+**asun**
+ASUN 只声明 **一次** Schema，数据以紧凑元组方式流式传输：
+
 ```asun
 [{id,name,active}]:
     (1,Alice,true),

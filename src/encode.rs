@@ -523,10 +523,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<ser::Impossible<(), Error>> {
-        Err(Error::Message(
-            "map fields are no longer supported; model key-value data as a slice of entry structs"
-                .into(),
-        ))
+        Err(Error::Message("map fields are not supported".into()))
     }
 
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<StructEncoder<'a>> {

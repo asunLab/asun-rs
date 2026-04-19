@@ -252,10 +252,6 @@ impl<'de> Deserializer<'de> {
                 self.pos += 1;
                 self.skip_whitespace();
                 self.parse_schema_annotation()?;
-            } else if self.pos < self.input.len() && self.input[self.pos] == b':' {
-                return Err(Error::Message(
-                    "legacy ':' field annotations are not supported; use '@'".into(),
-                ));
             }
         }
 
@@ -1222,10 +1218,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
 
     #[inline]
     fn deserialize_map<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value> {
-        Err(Error::Message(
-            "map fields are no longer supported; model key-value data as a list of entry tuples"
-                .into(),
-        ))
+        Err(Error::Message("map fields are not supported".into()))
     }
 
     #[inline]
