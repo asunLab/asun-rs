@@ -359,10 +359,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<ser::Impossible<(), Error>> {
-        Err(Error::Message(
-            "map fields are no longer supported; model key-value data as a slice of entry structs"
-                .into(),
-        ))
+        Err(Error::Message("map fields are not supported".into()))
     }
 
     /// Struct: fields written in order, no length prefix.
@@ -812,10 +809,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value> {
-        Err(Error::Message(
-            "map fields are no longer supported; model key-value data as a slice of entry structs"
-                .into(),
-        ))
+        Err(Error::Message("map fields are not supported".into()))
     }
 
     /// Struct: fields are positional — no count prefix in data.
