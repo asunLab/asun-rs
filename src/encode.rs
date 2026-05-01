@@ -107,31 +107,57 @@ fn needs_quoting(s: &str) -> bool {
     if bytes.is_empty() {
         return true;
     }
-    if bytes[0] == b' ' || bytes[bytes.len() - 1] == b' ' {
+    // Any leading/trailing ASCII whitespace must force quoting (SPEC §S2 trim).
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if matches!(first, b' ' | b'\t' | b'\n' | b'\r') || matches!(last, b' ' | b'\t' | b'\n' | b'\r')
+    {
         return true;
     }
-    if (bytes.len() == 4 && bytes == b"true") || (bytes.len() == 5 && bytes == b"false") {
+    // Bool / null lookalikes.
+    if matches!(
+        bytes,
+        b"true" | b"false" | b"True" | b"False" | b"TRUE" | b"FALSE"
+    ) {
         return true;
     }
 
     // SIMD fast-path: check for ASUN special chars in bulk
+    // (covers space, control, structural, comment-introducing, etc.)
     if simd::simd_has_special_chars(bytes) {
         return true;
     }
 
-    // Check if it looks like a number (would be ambiguous as a bare value)
-    let num_start = if bytes[0] == b'-' { 1 } else { 0 };
-    if num_start < bytes.len() {
-        let mut could_be_number = true;
-        for i in num_start..bytes.len() {
-            if !bytes[i].is_ascii_digit() && bytes[i] != b'.' {
-                could_be_number = false;
-                break;
+    // Number-pattern check: anything decoder might re-read as a number.
+    // Accepts optional sign, digits, decimal point, scientific exponent.
+    let mut i = 0;
+    if first == b'-' || first == b'+' {
+        i = 1;
+    }
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+    let mut saw_exp = false;
+    let mut number_like = true;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_digit() {
+            saw_digit = true;
+        } else if b == b'.' && !saw_dot && !saw_exp {
+            saw_dot = true;
+        } else if (b == b'e' || b == b'E') && saw_digit && !saw_exp {
+            saw_exp = true;
+            if i + 1 < bytes.len() && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-') {
+                i += 1;
             }
+            saw_digit = false;
+        } else {
+            number_like = false;
+            break;
         }
-        if could_be_number {
-            return true;
-        }
+        i += 1;
+    }
+    if number_like && saw_digit {
+        return true;
     }
     false
 }

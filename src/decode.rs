@@ -462,12 +462,18 @@ impl<'de> Deserializer<'de> {
                     b'\\' => result.push('\\'),
                     b'n' => result.push('\n'),
                     b't' => result.push('\t'),
+                    b'r' => result.push('\r'),
+                    b'b' => result.push('\u{0008}'),
+                    b'f' => result.push('\u{000C}'),
                     b',' => result.push(','),
                     b'(' => result.push('('),
                     b')' => result.push(')'),
                     b'[' => result.push('['),
                     b']' => result.push(']'),
+                    b'{' => result.push('{'),
+                    b'}' => result.push('}'),
                     b':' => result.push(':'),
+                    b'@' => result.push('@'),
                     b'u' => {
                         if self.pos + 4 > self.input.len() {
                             return Err(Error::InvalidUnicodeEscape);
@@ -592,36 +598,58 @@ impl<'de> Deserializer<'de> {
     }
 
     /// Parse f64 directly using fast-float for speed.
+    ///
+    /// Enforces ABNF `float = ["-"] 1*DIGIT ( "." 1*DIGIT [exponent] / exponent )`:
+    /// the integer part must have ≥1 digit, and if a decimal point is present
+    /// the fractional part must also have ≥1 digit. Tokens like `"5."`, `".5"`,
+    /// or `"+5"` are rejected so the caller can fall back to plain-string.
     #[inline]
     fn parse_f64_direct(&mut self) -> Result<f64> {
         let start = self.pos;
         if self.pos < self.input.len() && self.input[self.pos] == b'-' {
             self.pos += 1;
         }
+        let int_start = self.pos;
         while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
             self.pos += 1;
         }
+        let int_digits = self.pos - int_start;
+        let mut had_dot_or_exp = false;
         if self.pos < self.input.len() && self.input[self.pos] == b'.' {
+            had_dot_or_exp = true;
             self.pos += 1;
+            let frac_start = self.pos;
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
                 self.pos += 1;
+            }
+            // ABNF requires at least one digit after the decimal point.
+            if self.pos == frac_start {
+                return Err(Error::InvalidNumber);
             }
         }
         // Handle scientific notation (e.g. 1.5e10)
         if self.pos < self.input.len()
             && (self.input[self.pos] == b'e' || self.input[self.pos] == b'E')
         {
+            had_dot_or_exp = true;
             self.pos += 1;
             if self.pos < self.input.len()
                 && (self.input[self.pos] == b'+' || self.input[self.pos] == b'-')
             {
                 self.pos += 1;
             }
+            let exp_start = self.pos;
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
+            // ABNF requires at least one digit in the exponent.
+            if self.pos == exp_start {
+                return Err(Error::InvalidNumber);
+            }
         }
-        if self.pos == start || (self.pos == start + 1 && self.input[start] == b'-') {
+        // Must have at least one integer digit, and must actually be a float
+        // (contain "." or "e"/"E"); otherwise it's an integer / not a number.
+        if int_digits == 0 || !had_dot_or_exp {
             return Err(Error::InvalidNumber);
         }
         let s = &self.input[start..self.pos];
@@ -658,6 +686,21 @@ impl<'de> Deserializer<'de> {
             return true;
         }
         matches!(self.input[self.pos], b',' | b')' | b']')
+    }
+
+    /// True when the current byte is whitespace, a newline, or the start of
+    /// a block comment. Used to permit a numeric literal to be followed by
+    /// trailing layout (e.g. top-level "  42  ").
+    #[inline(always)]
+    fn is_at_layout(&self) -> bool {
+        if self.pos >= self.input.len() {
+            return false;
+        }
+        let b = self.input[self.pos];
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            return true;
+        }
+        b == b'/' && self.pos + 1 < self.input.len() && self.input[self.pos + 1] == b'*'
     }
 
     #[inline(always)]
@@ -888,11 +931,17 @@ fn unescape_plain(s: &str) -> Result<String> {
                 b')' => result.push(')'),
                 b'[' => result.push('['),
                 b']' => result.push(']'),
+                b'{' => result.push('{'),
+                b'}' => result.push('}'),
                 b':' => result.push(':'),
+                b'@' => result.push('@'),
                 b'"' => result.push('"'),
                 b'\\' => result.push('\\'),
                 b'n' => result.push('\n'),
                 b't' => result.push('\t'),
+                b'r' => result.push('\r'),
+                b'b' => result.push('\u{0008}'),
+                b'f' => result.push('\u{000C}'),
                 b'u' => {
                     if i + 4 >= bytes.len() {
                         return Err(Error::InvalidUnicodeEscape);
@@ -947,6 +996,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 if negative {
                     self.pos += 1;
                 }
+                let digits_start = self.pos;
                 let mut val: u64 = 0;
                 while self.pos < self.input.len() {
                     let d = self.input[self.pos].wrapping_sub(b'0');
@@ -956,15 +1006,38 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                     val = val.wrapping_mul(10).wrapping_add(d as u64);
                     self.pos += 1;
                 }
-                // Check if there's a decimal point → parse as float
-                if self.pos < self.input.len() && self.input[self.pos] == b'.' {
+                // Check if there's a decimal point or scientific exponent → parse as float
+                let next = self.input.get(self.pos).copied();
+                if matches!(next, Some(b'.') | Some(b'e') | Some(b'E')) {
                     // Reset and parse entire number as float with fast-float
                     self.pos = sign_pos;
-                    let f = self.parse_f64_direct()?;
-                    visitor.visit_f64(f)
-                } else {
+                    // If float parsing fails OR leaves trailing junk, fall back
+                    // to string (SPEC §8.1: type-priority cascade).
+                    let snapshot = self.pos;
+                    match self.parse_f64_direct() {
+                        Ok(f) if self.at_value_end() || self.is_at_layout() => visitor.visit_f64(f),
+                        _ => {
+                            self.pos = snapshot;
+                            let cow = self.parse_any_value_str()?;
+                            match cow {
+                                CowStr::Borrowed(s) => visitor.visit_borrowed_str(s),
+                                CowStr::Owned(s) => visitor.visit_string(s),
+                            }
+                        }
+                    }
+                } else if self.pos > digits_start && (self.at_value_end() || self.is_at_layout()) {
                     let i = if negative { -(val as i64) } else { val as i64 };
                     visitor.visit_i64(i)
+                } else {
+                    // Either no digits at all (e.g. "-foo") or digits followed
+                    // by non-terminator junk (e.g. "123abc"). SPEC §8.1 says
+                    // such inputs are plain strings.
+                    self.pos = sign_pos;
+                    let cow = self.parse_any_value_str()?;
+                    match cow {
+                        CowStr::Borrowed(s) => visitor.visit_borrowed_str(s),
+                        CowStr::Owned(s) => visitor.visit_string(s),
+                    }
                 }
             }
             ValueType::String => {
@@ -975,7 +1048,19 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 }
             }
             ValueType::Array => self.deserialize_seq(visitor),
-            ValueType::Tuple => self.deserialize_map(visitor),
+            ValueType::Tuple => {
+                // `()` (empty parens) is the untyped null marker — the encoder
+                // emits it for `null` array elements that would otherwise be
+                // ambiguous with empty/trailing slots.
+                if self.pos + 1 < self.input.len()
+                    && self.input[self.pos] == b'('
+                    && self.input[self.pos + 1] == b')'
+                {
+                    self.pos += 2;
+                    return visitor.visit_none();
+                }
+                self.deserialize_map(visitor)
+            }
         }
     }
 

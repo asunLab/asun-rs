@@ -230,7 +230,8 @@ pub use imp::*;
 // ============================================================================
 
 /// SIMD-accelerated check: does `s` contain any byte that needs ASUN quoting?
-/// Checks for: control chars (<=0x1f), comma, at-sign, parens, brackets, double-quote, backslash.
+/// Checks for: control chars (<=0x1f), space, comma, at-sign, parens, brackets,
+/// braces, colon, angle brackets, slash, asterisk, double-quote, backslash.
 ///
 /// Returns `true` if any special byte is found.
 #[inline]
@@ -240,12 +241,20 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
 
     unsafe {
         let v_1f = splat(0x1f);
+        let v_space = splat(b' ');
         let v_comma = splat(b',');
         let v_at = splat(b'@');
         let v_lparen = splat(b'(');
         let v_rparen = splat(b')');
         let v_lbracket = splat(b'[');
         let v_rbracket = splat(b']');
+        let v_lbrace = splat(b'{');
+        let v_rbrace = splat(b'}');
+        let v_colon = splat(b':');
+        let v_lt = splat(b'<');
+        let v_gt = splat(b'>');
+        let v_slash = splat(b'/');
+        let v_star = splat(b'*');
         let v_quote = splat(b'"');
         let v_backslash = splat(b'\\');
 
@@ -254,14 +263,26 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
             let mask = movemask(or(
                 or(
                     or(
-                        cmple(chunk, v_1f),
-                        or(cmpeq(chunk, v_comma), cmpeq(chunk, v_at)),
+                        or(cmple(chunk, v_1f), cmpeq(chunk, v_space)),
+                        or(
+                            or(cmpeq(chunk, v_comma), cmpeq(chunk, v_at)),
+                            or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
+                        ),
                     ),
-                    or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
+                    or(
+                        or(cmpeq(chunk, v_lbracket), cmpeq(chunk, v_rbracket)),
+                        or(cmpeq(chunk, v_lbrace), cmpeq(chunk, v_rbrace)),
+                    ),
                 ),
                 or(
-                    or(cmpeq(chunk, v_lbracket), cmpeq(chunk, v_rbracket)),
-                    or(cmpeq(chunk, v_quote), cmpeq(chunk, v_backslash)),
+                    or(
+                        or(cmpeq(chunk, v_colon), cmpeq(chunk, v_lt)),
+                        or(cmpeq(chunk, v_gt), cmpeq(chunk, v_slash)),
+                    ),
+                    or(
+                        or(cmpeq(chunk, v_star), cmpeq(chunk, v_quote)),
+                        cmpeq(chunk, v_backslash),
+                    ),
                 ),
             ));
             if mask != 0 {
@@ -275,7 +296,8 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
     static NEEDS_QUOTE: [bool; 256] = {
         let mut t = [false; 256];
         let mut j = 0usize;
-        while j < 32 {
+        while j < 33 {
+            // 0x00..=0x1f plus 0x20 (space)
             t[j] = true;
             j += 1;
         }
@@ -285,8 +307,16 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
         t[b')' as usize] = true;
         t[b'[' as usize] = true;
         t[b']' as usize] = true;
+        t[b'{' as usize] = true;
+        t[b'}' as usize] = true;
+        t[b':' as usize] = true;
+        t[b'<' as usize] = true;
+        t[b'>' as usize] = true;
+        t[b'/' as usize] = true;
+        t[b'*' as usize] = true;
         t[b'"' as usize] = true;
         t[b'\\' as usize] = true;
+        t[0x7f] = true;
         t
     };
 
@@ -309,17 +339,21 @@ pub fn simd_find_escape(bytes: &[u8], start: usize) -> usize {
     let mut i = start;
 
     // Escape table: bytes that need escaping during serialization
-    // " (0x22), \ (0x5C), and control chars (0x00-0x1F)
+    // " (0x22), \ (0x5C), control chars (0x00-0x1F), DEL (0x7F)
     unsafe {
         let v_1f = splat(0x1f);
         let v_quote = splat(b'"');
         let v_backslash = splat(b'\\');
+        let v_del = splat(0x7f);
 
         while i + LANES <= len {
             let chunk = load(bytes.as_ptr().add(i));
             let mask = movemask(or(
                 cmple(chunk, v_1f),
-                or(cmpeq(chunk, v_quote), cmpeq(chunk, v_backslash)),
+                or(
+                    cmpeq(chunk, v_quote),
+                    or(cmpeq(chunk, v_backslash), cmpeq(chunk, v_del)),
+                ),
             ));
             if mask != 0 {
                 return i + first_set_bit(mask) as usize;
@@ -331,7 +365,7 @@ pub fn simd_find_escape(bytes: &[u8], start: usize) -> usize {
     // Scalar tail
     while i < len {
         let b = bytes[i];
-        if b <= 0x1f || b == b'"' || b == b'\\' {
+        if b <= 0x1f || b == b'"' || b == b'\\' || b == 0x7f {
             return i;
         }
         i += 1;
@@ -466,13 +500,16 @@ pub fn simd_skip_whitespace(bytes: &[u8], start: usize) -> usize {
 /// Returns the number of bytes written.
 #[inline]
 pub fn simd_write_escaped(buf: &mut Vec<u8>, s: &[u8]) {
-    /// Escape lookup: maps byte → (replacement_char, 0 if no escape needed)
+    /// Escape lookup: maps byte → (replacement_char, 0 if no shortcut)
     static ESCAPE: [u8; 256] = {
         let mut t = [0u8; 256];
         t[b'"' as usize] = b'"';
         t[b'\\' as usize] = b'\\';
         t[b'\n' as usize] = b'n';
+        t[b'\r' as usize] = b'r';
         t[b'\t' as usize] = b't';
+        t[0x08] = b'b';
+        t[0x0c] = b'f';
         t
     };
 
@@ -624,13 +661,20 @@ mod tests {
 
     #[test]
     fn test_simd_has_special_chars() {
-        assert!(!simd_has_special_chars(b"hello world"));
+        // Space is now considered special (forces quoting per SPEC §S2).
+        assert!(simd_has_special_chars(b"hello world"));
+        assert!(!simd_has_special_chars(b"helloworld"));
         assert!(simd_has_special_chars(b"hello,world"));
         assert!(simd_has_special_chars(b"hello@world"));
         assert!(simd_has_special_chars(b"hello(world"));
         assert!(simd_has_special_chars(b"hello)world"));
         assert!(simd_has_special_chars(b"hello[world"));
         assert!(simd_has_special_chars(b"hello]world"));
+        assert!(simd_has_special_chars(b"hello{world"));
+        assert!(simd_has_special_chars(b"hello}world"));
+        assert!(simd_has_special_chars(b"hello:world"));
+        assert!(simd_has_special_chars(b"hello/world"));
+        assert!(simd_has_special_chars(b"hello*world"));
         assert!(simd_has_special_chars(b"hello\"world"));
         assert!(simd_has_special_chars(b"hello\\world"));
         assert!(simd_has_special_chars(b"hello\nworld"));
