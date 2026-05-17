@@ -128,6 +128,15 @@ fn needs_quoting(s: &str) -> bool {
         return true;
     }
 
+    // Number-pattern check: only relevant when the first byte could plausibly
+    // begin a number literal. For strings starting with a letter or any other
+    // non-numeric byte, the whole-string pattern match cannot succeed, so we
+    // skip the inner loop entirely. This is the common case for ASCII names,
+    // emails (already caught by '@' above), tags, etc.
+    if !matches!(first, b'-' | b'+' | b'0'..=b'9' | b'.') {
+        return false;
+    }
+
     // Number-pattern check: anything decoder might re-read as a number.
     // Accepts optional sign, digits, decimal point, scientific exponent.
     let mut i = 0;
@@ -188,6 +197,12 @@ pub struct Encoder {
     top_seq_field_schemas: Option<Vec<Option<Vec<u8>>>>,
     /// Schema fragment bubbled up from nested struct/seq-of-struct serializers.
     nested_schema: Option<Vec<u8>>,
+    /// Set by `SeqEncoder` after the first struct element has been seen, so
+    /// that the remaining rows of a homogeneous `Vec<Struct>` can skip the
+    /// per-row schema bookkeeping (allocations + bubble-up build) entirely.
+    /// The schema captured from the first row is reused for every subsequent
+    /// row in the same sequence.
+    skip_schema_capture: bool,
 }
 
 pub fn encode<T: Serialize>(value: &T) -> Result<String> {
@@ -203,6 +218,7 @@ pub fn encode<T: Serialize>(value: &T) -> Result<String> {
         top_seq_field_types: None,
         top_seq_field_schemas: None,
         nested_schema: None,
+        skip_schema_capture: false,
     };
     value.serialize(&mut serializer)?;
     Ok(unsafe { String::from_utf8_unchecked(serializer.buf) })
@@ -224,6 +240,7 @@ pub fn encode_typed<T: Serialize>(value: &T) -> Result<String> {
         top_seq_field_types: None,
         top_seq_field_schemas: None,
         nested_schema: None,
+        skip_schema_capture: false,
     };
     value.serialize(&mut serializer)?;
     Ok(unsafe { String::from_utf8_unchecked(serializer.buf) })
@@ -499,6 +516,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
                 ser: self,
                 first: true,
                 is_top_seq: true,
+                cached_nested_schema: None,
             })
         } else {
             if let Some(len) = len {
@@ -510,6 +528,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
                 ser: self,
                 first: true,
                 is_top_seq: false,
+                cached_nested_schema: None,
             })
         }
     }
@@ -555,6 +574,10 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<StructEncoder<'a>> {
         let is_top = !self.in_tuple;
         let capture_for_seq = !is_top && self.in_top_seq && self.top_seq_fields.is_none();
+        // Skip per-row schema bookkeeping for the 2nd+ rows of a homogeneous
+        // Vec<Struct>. The first row populated `top_seq_fields/_types/_schemas`,
+        // and subsequent rows produce the same schema fragment by construction.
+        let skip = self.skip_schema_capture;
         self.reserve_for_struct(len, is_top);
         if is_top {
             self.buf.push(b'(');
@@ -566,18 +589,32 @@ impl<'a> ser::Serializer for &'a mut Encoder {
                 field_schemas: Vec::with_capacity(len),
                 is_top: true,
                 capture_for_seq: false,
+                skip_schema: false,
                 first: true,
             })
         } else {
             self.push_separator();
             self.buf.push(b'(');
+            // When skipping, allocate empty Vecs (no capacity) — they won't be
+            // pushed into. This keeps the struct field types stable while
+            // avoiding per-row 3 × len allocations.
+            let (fields, field_types, field_schemas) = if skip {
+                (Vec::new(), Vec::new(), Vec::new())
+            } else {
+                (
+                    Vec::with_capacity(len),
+                    Vec::with_capacity(len),
+                    Vec::with_capacity(len),
+                )
+            };
             Ok(StructEncoder {
                 ser: self,
-                fields: Vec::with_capacity(len),
-                field_types: Vec::with_capacity(len),
-                field_schemas: Vec::with_capacity(len),
+                fields,
+                field_types,
+                field_schemas,
                 is_top: false,
                 capture_for_seq,
+                skip_schema: skip,
                 first: true,
             })
         }
@@ -601,6 +638,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
             field_schemas: Vec::new(),
             is_top: false,
             capture_for_seq: false,
+            skip_schema: false,
             first: true,
         })
     }
@@ -614,6 +652,9 @@ pub struct SeqEncoder<'a> {
     ser: &'a mut Encoder,
     first: bool,
     is_top_seq: bool,
+    /// For nested Vec<Struct>: schema fragment captured from row 1 so we can
+    /// restore it after later rows in skip-mode wipe `nested_schema`.
+    cached_nested_schema: Option<Vec<u8>>,
 }
 
 impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
@@ -625,13 +666,34 @@ impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
         if !self.first {
             self.ser.buf.push(b',');
         }
+        let was_first = self.first;
         self.first = false;
         self.ser.first = true;
-        value.serialize(&mut *self.ser)
+        let result = value.serialize(&mut *self.ser);
+        // After the first homogeneous struct row of a top-level seq has been
+        // serialized, fields/types/schemas are cached on the encoder. Tell
+        // subsequent rows to skip per-row schema bookkeeping.
+        if was_first && self.is_top_seq && self.ser.top_seq_fields.is_some() {
+            self.ser.skip_schema_capture = true;
+        }
+        // For nested Vec<Struct>: row 1's StructEncoder::end() bubbled up a
+        // schema fragment via `nested_schema`. Stash it on the seq so we can
+        // restore it after this seq ends, and ask later rows to skip rebuild.
+        if was_first && !self.is_top_seq && self.ser.nested_schema.is_some() {
+            self.cached_nested_schema = self.ser.nested_schema.clone();
+            self.ser.skip_schema_capture = true;
+        }
+        result
     }
 
     #[inline]
-    fn end(self) -> Result<()> {
+    fn end(mut self) -> Result<()> {
+        // Reset the per-seq cached-schema flag regardless of seq kind.
+        self.ser.skip_schema_capture = false;
+        // Restore the nested schema captured from row 1 (skip-mode wiped it).
+        if let Some(cached) = self.cached_nested_schema.take() {
+            self.ser.nested_schema = Some(cached);
+        }
         if self.is_top_seq {
             if let Some(ref fields) = self.ser.top_seq_fields {
                 // Struct elements: build header once, then append the already
@@ -776,6 +838,9 @@ pub struct StructEncoder<'a> {
     field_schemas: Vec<Option<Vec<u8>>>,
     is_top: bool,
     capture_for_seq: bool,
+    /// True for the 2nd+ row of a homogeneous Vec<Struct>: skip recording field
+    /// names / types / nested schemas, since the seq's first row already did.
+    skip_schema: bool,
     first: bool,
 }
 
@@ -789,13 +854,15 @@ impl<'a> ser::SerializeStruct for StructEncoder<'a> {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
-        // Always capture field names for recursive schema generation
-        self.fields.push(key);
-        if self.ser.typed {
-            self.ser.current_type_hint = None;
+        if !self.skip_schema {
+            // Capture field names + per-field hint state only when this struct
+            // will actually emit a schema header / fragment.
+            self.fields.push(key);
+            if self.ser.typed {
+                self.ser.current_type_hint = None;
+            }
+            self.ser.nested_schema = None;
         }
-        // Clear nested schema before serializing value
-        self.ser.nested_schema = None;
 
         if !self.first {
             self.ser.buf.push(b',');
@@ -805,10 +872,18 @@ impl<'a> ser::SerializeStruct for StructEncoder<'a> {
         self.ser.in_tuple = true;
         value.serialize(&mut *self.ser)?;
 
-        // Capture nested schema (set by nested StructEncoder or SeqEncoder)
-        self.field_schemas.push(self.ser.nested_schema.take());
-        if self.ser.typed {
-            self.field_types.push(self.ser.current_type_hint.take());
+        if !self.skip_schema {
+            self.field_schemas.push(self.ser.nested_schema.take());
+            if self.ser.typed {
+                self.field_types.push(self.ser.current_type_hint.take());
+            }
+        } else {
+            // Discard transient state nested serializers may have set; we are
+            // not using it.
+            self.ser.nested_schema = None;
+            if self.ser.typed {
+                self.ser.current_type_hint = None;
+            }
         }
         Ok(())
     }
@@ -839,6 +914,14 @@ impl<'a> ser::SerializeStruct for StructEncoder<'a> {
             out.extend_from_slice(b"}:");
             out.append(&mut data);
             self.ser.buf = out;
+        } else if self.skip_schema {
+            // Homogeneous Vec<Struct> non-first row: only the data tuple was
+            // emitted. No header bubble-up to do.
+            self.ser.buf.push(b')');
+            self.ser.first = false;
+            if self.ser.typed {
+                self.ser.current_type_hint = None;
+            }
         } else {
             self.ser.buf.push(b')');
             self.ser.first = false;
