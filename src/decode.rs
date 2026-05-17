@@ -43,12 +43,19 @@ pub struct Deserializer<'de> {
     /// meaning the next struct should use those field names directly
     /// (source schema) rather than replacing with target struct fields.
     vec_schema_active: bool,
-    /// Cache the last resolved field alignment for repeated rows using the
-    /// same source schema and target field list.
-    last_struct_mode: Option<CachedStructMode>,
+    /// Tiny MRU cache of resolved field alignments. For deep nested structs
+    /// (e.g. `Company > Division > Team > Project > Task`) several struct
+    /// types interleave during a single decode; a 1-slot cache thrashes and
+    /// every miss falls back to the global HashMap (`SipHash` hot in profile).
+    /// `MRU_SLOTS` is sized to comfortably cover realistic nesting depths.
+    last_struct_mode: [Option<CachedStructMode>; MRU_SLOTS],
+    /// Index of the most recently filled MRU slot — checked first.
+    last_struct_mode_head: usize,
     /// Per-decode cache for repeated nested struct/source-schema alignments.
     struct_mode_cache_local: HashMap<StructModeCacheKey, CachedStructPlan>,
 }
+
+const MRU_SLOTS: usize = 8;
 
 pub fn decode<'a, T: Deserialize<'a>>(s: &'a str) -> Result<T> {
     let mut de = Deserializer {
@@ -57,7 +64,8 @@ pub fn decode<'a, T: Deserialize<'a>>(s: &'a str) -> Result<T> {
         schema_fields: None,
         field_index: 0,
         vec_schema_active: false,
-        last_struct_mode: None,
+        last_struct_mode: [const { None }; MRU_SLOTS],
+        last_struct_mode_head: 0,
         struct_mode_cache_local: HashMap::new(),
     };
     de.skip_whitespace_and_comments();
@@ -732,13 +740,12 @@ impl<'de> Deserializer<'de> {
             target_len,
         };
 
-        if let Some(cached) = &self.last_struct_mode {
-            if cached.cache_key == cache_key
-                && cached.target_ptr == target_ptr
-                && cached.target_len == target_len
-            {
-                return cached.mode.clone();
-            }
+        // MRU fast path: linear-search a small fixed-size array. Skips the
+        // expensive `HashMap::get` (SipHash) when the same handful of struct
+        // shapes alternate (typical in deeply nested data, e.g.
+        // Company > Division > Team > Project > Task on every row).
+        if let Some(mode) = self.mru_get(&cache_key, target_ptr, target_len) {
+            return mode;
         }
 
         if let Some(cached) = self.struct_mode_cache_local.get(&cache_key).cloned() {
@@ -748,12 +755,7 @@ impl<'de> Deserializer<'de> {
                     StructMode::WithDefaults { missing_fields }
                 }
             };
-            self.last_struct_mode = Some(CachedStructMode {
-                cache_key,
-                target_ptr,
-                target_len,
-                mode: mode.clone(),
-            });
+            self.mru_put(cache_key, target_ptr, target_len, &mode);
             return mode;
         }
 
@@ -765,12 +767,7 @@ impl<'de> Deserializer<'de> {
                 },
             };
             self.struct_mode_cache_local.insert(cache_key, cached);
-            self.last_struct_mode = Some(CachedStructMode {
-                cache_key,
-                target_ptr,
-                target_len,
-                mode: mode.clone(),
-            });
+            self.mru_put(cache_key, target_ptr, target_len, &mode);
             return mode;
         }
 
@@ -787,13 +784,44 @@ impl<'de> Deserializer<'de> {
             .lock()
             .unwrap()
             .insert(cache_key, cached);
-        self.last_struct_mode = Some(CachedStructMode {
+        self.mru_put(cache_key, target_ptr, target_len, &mode);
+        mode
+    }
+
+    #[inline]
+    fn mru_get(
+        &self,
+        cache_key: &StructModeCacheKey,
+        target_ptr: usize,
+        target_len: usize,
+    ) -> Option<StructMode> {
+        for slot in self.last_struct_mode.iter().flatten() {
+            if slot.cache_key == *cache_key
+                && slot.target_ptr == target_ptr
+                && slot.target_len == target_len
+            {
+                return Some(slot.mode.clone());
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn mru_put(
+        &mut self,
+        cache_key: StructModeCacheKey,
+        target_ptr: usize,
+        target_len: usize,
+        mode: &StructMode,
+    ) {
+        let slot = self.last_struct_mode_head;
+        self.last_struct_mode[slot] = Some(CachedStructMode {
             cache_key,
             target_ptr,
             target_len,
             mode: mode.clone(),
         });
-        mode
+        self.last_struct_mode_head = (slot + 1) % MRU_SLOTS;
     }
 }
 

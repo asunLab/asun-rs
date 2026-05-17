@@ -246,35 +246,47 @@ pub fn encode_typed<T: Serialize>(value: &T) -> Result<String> {
     Ok(unsafe { String::from_utf8_unchecked(serializer.buf) })
 }
 
+/// Per GRAMMAR.abnf `bare-field-name = 1*( ALPHA / DIGIT / "_" )`. Anything
+/// outside that set forces a quoted-string field name, plus:
+///   - bare reserved words `true` / `false` (would re-decode as booleans);
+///   - all-digit names (cross-implementation compatibility — some decoders
+///     are stricter than the grammar and reject digit-only bare names).
+///
+/// Hot path: gets called once per field per `encode()`. For 16-field
+/// structs it accounts for >10 % of total encode time, so it's hand-tuned to
+/// a single byte-scan with no per-byte trait dispatch.
+#[inline]
 fn schema_field_name_needs_quotes(name: &str) -> bool {
-    if name.is_empty() {
+    let bytes = name.as_bytes();
+    let n = bytes.len();
+    if n == 0 {
         return true;
     }
-    if name == "true" || name == "false" {
-        return true;
-    }
-    if name.starts_with(' ') || name.ends_with(' ') {
-        return true;
-    }
-    let mut could_be_number = true;
-    let num_start = if name.as_bytes()[0] == b'-' { 1 } else { 0 };
-    if num_start >= name.len() {
-        could_be_number = false;
-    }
-    for (idx, &b) in name.as_bytes().iter().enumerate() {
-        if b <= 0x20
-            || matches!(
-                b,
-                b',' | b'@' | b':' | b'{' | b'}' | b'[' | b']' | b'(' | b')' | b'"' | b'\\'
-            )
-        {
+
+    // Single byte-scan: every byte must be ALPHA / DIGIT / `_`. Anything else
+    // (including space, control chars, structural punctuation) needs quoting.
+    // While scanning, also track whether the name is purely digit-only so we
+    // can quote those for cross-implementation safety.
+    let mut all_digits = true;
+    let mut i = 0;
+    while i < n {
+        let b = bytes[i];
+        let is_digit = b >= b'0' && b <= b'9';
+        let is_alpha = (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z');
+        if !(is_alpha || is_digit || b == b'_') {
             return true;
         }
-        if could_be_number && idx >= num_start && !b.is_ascii_digit() && b != b'.' {
-            could_be_number = false;
+        if !is_digit {
+            all_digits = false;
         }
+        i += 1;
     }
-    could_be_number && name.len() > num_start
+    if all_digits {
+        return true;
+    }
+
+    // Reserved keywords (would be re-parsed as booleans).
+    matches!(bytes, b"true" | b"false")
 }
 
 fn push_schema_field_name(buf: &mut Vec<u8>, name: &str) {
@@ -335,7 +347,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     #[inline]
     fn serialize_bool(self, v: bool) -> Result<()> {
         self.push_separator();
-        if self.current_type_hint.is_none() && self.typed {
+        if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("bool");
         }
         self.buf
@@ -359,7 +371,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     #[inline]
     fn serialize_i64(self, v: i64) -> Result<()> {
         self.push_separator();
-        if self.current_type_hint.is_none() && self.typed {
+        if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("int");
         }
         write_i64(&mut self.buf, v);
@@ -382,7 +394,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     #[inline]
     fn serialize_u64(self, v: u64) -> Result<()> {
         self.push_separator();
-        if self.current_type_hint.is_none() && self.typed {
+        if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("int");
         }
         write_u64(&mut self.buf, v);
@@ -397,7 +409,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     #[inline]
     fn serialize_f64(self, v: f64) -> Result<()> {
         self.push_separator();
-        if self.current_type_hint.is_none() && self.typed {
+        if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("float");
         }
         write_f64(&mut self.buf, v);
@@ -407,7 +419,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     #[inline]
     fn serialize_char(self, v: char) -> Result<()> {
         self.push_separator();
-        if self.current_type_hint.is_none() && self.typed {
+        if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("str");
         }
         let mut tmp = [0u8; 4];
@@ -419,7 +431,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
     #[inline]
     fn serialize_str(self, v: &str) -> Result<()> {
         self.push_separator();
-        if self.current_type_hint.is_none() && self.typed {
+        if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("str");
         }
         if needs_quoting(v) {
@@ -517,6 +529,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
                 first: true,
                 is_top_seq: true,
                 cached_nested_schema: None,
+                skip_was_set: false,
             })
         } else {
             if let Some(len) = len {
@@ -529,6 +542,7 @@ impl<'a> ser::Serializer for &'a mut Encoder {
                 first: true,
                 is_top_seq: false,
                 cached_nested_schema: None,
+                skip_was_set: false,
             })
         }
     }
@@ -655,6 +669,11 @@ pub struct SeqEncoder<'a> {
     /// For nested Vec<Struct>: schema fragment captured from row 1 so we can
     /// restore it after later rows in skip-mode wipe `nested_schema`.
     cached_nested_schema: Option<Vec<u8>>,
+    /// Tracks whether *this* seq is the one that asserted the encoder's
+    /// `skip_schema_capture` flag. Without this we'd reset on `end()` even
+    /// when an outer seq owns the flag (e.g. inner primitive `Vec<i64>`
+    /// running while the outer `Vec<Struct>` is still iterating).
+    skip_was_set: bool,
 }
 
 impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
@@ -675,6 +694,7 @@ impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
         // subsequent rows to skip per-row schema bookkeeping.
         if was_first && self.is_top_seq && self.ser.top_seq_fields.is_some() {
             self.ser.skip_schema_capture = true;
+            self.skip_was_set = true;
         }
         // For nested Vec<Struct>: row 1's StructEncoder::end() bubbled up a
         // schema fragment via `nested_schema`. Stash it on the seq so we can
@@ -682,14 +702,22 @@ impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
         if was_first && !self.is_top_seq && self.ser.nested_schema.is_some() {
             self.cached_nested_schema = self.ser.nested_schema.clone();
             self.ser.skip_schema_capture = true;
+            self.skip_was_set = true;
         }
         result
     }
 
     #[inline]
     fn end(mut self) -> Result<()> {
-        // Reset the per-seq cached-schema flag regardless of seq kind.
-        self.ser.skip_schema_capture = false;
+        // Only reset the encoder's `skip_schema_capture` if WE were the ones
+        // who set it. Without this guard, a nested primitive seq (e.g. a
+        // `Vec<i64>` field on row 2 of a top-level `Vec<Struct>`) would
+        // clobber the outer seq's skip flag and force every later row of the
+        // outer seq to redo schema bookkeeping. That bug wasted >10 % of
+        // total encode time for 16-field structs.
+        if self.skip_was_set {
+            self.ser.skip_schema_capture = false;
+        }
         // Restore the nested schema captured from row 1 (skip-mode wiped it).
         if let Some(cached) = self.cached_nested_schema.take() {
             self.ser.nested_schema = Some(cached);
@@ -740,8 +768,17 @@ impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
             self.ser.in_top_seq = false;
         } else {
             self.ser.buf.push(b']');
-            // If elements were structs, wrap their schema in [...] and bubble up
-            if let Some(schema) = self.ser.nested_schema.take() {
+            // The schema-fragment bubble-up below feeds the parent struct's
+            // schema header. When the encoder is in skip-schema mode (rows
+            // 2+ of a homogeneous Vec<Struct>) the parent will discard
+            // anything we put here, so there's no need to allocate the
+            // `[...]` wrapper Vec at all.
+            if self.ser.skip_schema_capture {
+                self.ser.nested_schema = None;
+                if self.ser.typed {
+                    self.ser.current_type_hint = None;
+                }
+            } else if let Some(schema) = self.ser.nested_schema.take() {
                 let mut wrapped = Vec::with_capacity(schema.len() + 2);
                 wrapped.push(b'[');
                 wrapped.extend_from_slice(&schema);

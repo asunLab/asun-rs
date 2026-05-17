@@ -37,3 +37,16 @@ path = "examples/bench.rs"
 [[example]]
 name = "cross_compat"
 path = "examples/cross_compat.rs"
+
+[[example]]
+name = "profile_target"
+path = "examples/profile_target.rs"
+
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
+[profile.release]
+debug = false
+
