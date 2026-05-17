@@ -593,68 +593,6 @@ pub fn simd_bulk_extend(dst: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
-// ============================================================================
-// SIMD-accelerated integer formatting
-// ============================================================================
-
-/// Two-digit lookup table for fast integer formatting (itoa-style).
-static DEC_DIGITS: &[u8; 200] = b"0001020304050607080910111213141516171819\
-2021222324252627282930313233343536373839\
-4041424344454647484950515253545556575859\
-6061626364656667686970717273747576777879\
-8081828384858687888990919293949596979899";
-
-/// Write u64 to buffer using 2-digits-at-a-time itoa technique.
-/// Writes directly into spare capacity to avoid bounds checks.
-#[inline(always)]
-pub fn fast_write_u64(buf: &mut Vec<u8>, mut v: u64) {
-    if v < 10 {
-        buf.push(b'0' + v as u8);
-        return;
-    }
-    if v < 100 {
-        let idx = v as usize * 2;
-        buf.push(DEC_DIGITS[idx]);
-        buf.push(DEC_DIGITS[idx + 1]);
-        return;
-    }
-    // Write digits in reverse using 2-at-a-time technique
-    let mut tmp = [0u8; 20];
-    let mut i = 20usize;
-    while v >= 100 {
-        let rem = (v % 100) as usize;
-        v /= 100;
-        i -= 2;
-        unsafe {
-            *tmp.get_unchecked_mut(i) = DEC_DIGITS[rem * 2];
-            *tmp.get_unchecked_mut(i + 1) = DEC_DIGITS[rem * 2 + 1];
-        }
-    }
-    if v >= 10 {
-        let idx = v as usize * 2;
-        i -= 2;
-        unsafe {
-            *tmp.get_unchecked_mut(i) = DEC_DIGITS[idx];
-            *tmp.get_unchecked_mut(i + 1) = DEC_DIGITS[idx + 1];
-        }
-    } else {
-        i -= 1;
-        tmp[i] = b'0' + v as u8;
-    }
-    buf.extend_from_slice(&tmp[i..]);
-}
-
-/// Write i64 to buffer.
-#[inline(always)]
-pub fn fast_write_i64(buf: &mut Vec<u8>, v: i64) {
-    if v < 0 {
-        buf.push(b'-');
-        fast_write_u64(buf, (-(v as i128)) as u64);
-    } else {
-        fast_write_u64(buf, v as u64);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,35 +686,4 @@ mod tests {
         assert_eq!(buf, b"\"\\u0001\"");
     }
 
-    #[test]
-    fn test_fast_write_u64() {
-        let cases = [0u64, 1, 9, 10, 99, 100, 999, 1234, 99999, 1000000, u64::MAX];
-        for &v in &cases {
-            let mut buf1 = Vec::new();
-            fast_write_u64(&mut buf1, v);
-            let expected = v.to_string();
-            assert_eq!(
-                String::from_utf8(buf1).unwrap(),
-                expected,
-                "fast_write_u64({}) failed",
-                v
-            );
-        }
-    }
-
-    #[test]
-    fn test_fast_write_i64() {
-        let cases = [0i64, 1, -1, 42, -42, i64::MAX, i64::MIN];
-        for &v in &cases {
-            let mut buf1 = Vec::new();
-            fast_write_i64(&mut buf1, v);
-            let expected = v.to_string();
-            assert_eq!(
-                String::from_utf8(buf1).unwrap(),
-                expected,
-                "fast_write_i64({}) failed",
-                v
-            );
-        }
-    }
 }
