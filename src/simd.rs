@@ -44,36 +44,54 @@ mod imp {
     use core::arch::aarch64::*;
 
     /// Load 16 bytes from `ptr` (unaligned).
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of 16 bytes.
     #[inline(always)]
     pub unsafe fn load(ptr: *const u8) -> uint8x16_t {
         unsafe { vld1q_u8(ptr) }
     }
 
     /// Store 16 bytes from SIMD register to `ptr` (unaligned).
+    ///
+    /// # Safety
+    /// `ptr` must be valid for writes of 16 bytes.
     #[inline(always)]
     pub unsafe fn store(ptr: *mut u8, v: uint8x16_t) {
         unsafe { vst1q_u8(ptr, v) };
     }
 
     /// Broadcast a single byte to all 16 lanes.
+    ///
+    /// # Safety
+    /// Requires the NEON target feature (always present on aarch64).
     #[inline(always)]
     pub unsafe fn splat(b: u8) -> uint8x16_t {
         unsafe { vdupq_n_u8(b) }
     }
 
     /// Compare equal: result lane = 0xFF where a[i] == b[i], else 0x00.
+    ///
+    /// # Safety
+    /// Requires the NEON target feature (always present on aarch64).
     #[inline(always)]
     pub unsafe fn cmpeq(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
         unsafe { vceqq_u8(a, b) }
     }
 
     /// Compare less-than-or-equal (unsigned): result lane = 0xFF where a[i] <= b[i].
+    ///
+    /// # Safety
+    /// Requires the NEON target feature (always present on aarch64).
     #[inline(always)]
     pub unsafe fn cmple(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
         unsafe { vcleq_u8(a, b) }
     }
 
     /// Bitwise OR of two vectors.
+    ///
+    /// # Safety
+    /// Requires the NEON target feature (always present on aarch64).
     #[inline(always)]
     pub unsafe fn or(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
         unsafe { vorrq_u8(a, b) }
@@ -84,6 +102,9 @@ mod imp {
     ///
     /// Uses the simdjson/sonic-rs shift-right-and-accumulate technique
     /// instead of 16 individual bit extractions.
+    ///
+    /// # Safety
+    /// Requires the NEON target feature (always present on aarch64).
     #[inline(always)]
     pub unsafe fn movemask(v: uint8x16_t) -> Mask16 {
         unsafe {
@@ -113,24 +134,36 @@ mod imp {
     use core::arch::x86_64::*;
 
     /// Load 16 bytes from `ptr` (unaligned).
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of 16 bytes.
     #[inline(always)]
     pub unsafe fn load(ptr: *const u8) -> __m128i {
         _mm_loadu_si128(ptr as *const __m128i)
     }
 
     /// Store 16 bytes from SIMD register to `ptr` (unaligned).
+    ///
+    /// # Safety
+    /// `ptr` must be valid for writes of 16 bytes.
     #[inline(always)]
     pub unsafe fn store(ptr: *mut u8, v: __m128i) {
         _mm_storeu_si128(ptr as *mut __m128i, v);
     }
 
     /// Broadcast a single byte to all 16 lanes.
+    ///
+    /// # Safety
+    /// Requires the SSE2 target feature (baseline on x86_64).
     #[inline(always)]
     pub unsafe fn splat(b: u8) -> __m128i {
         _mm_set1_epi8(b as i8)
     }
 
     /// Compare equal: result lane = 0xFF where a[i] == b[i], else 0x00.
+    ///
+    /// # Safety
+    /// Requires the SSE2 target feature (baseline on x86_64).
     #[inline(always)]
     pub unsafe fn cmpeq(a: __m128i, b: __m128i) -> __m128i {
         _mm_cmpeq_epi8(a, b)
@@ -138,12 +171,18 @@ mod imp {
 
     /// Compare less-than-or-equal (unsigned): a[i] <= b[i].
     /// SSE2 lacks unsigned LE compare, so we use: a <= b ↔ max(a,b) == b.
+    ///
+    /// # Safety
+    /// Requires the SSE2 target feature (baseline on x86_64).
     #[inline(always)]
     pub unsafe fn cmple(a: __m128i, b: __m128i) -> __m128i {
         _mm_cmpeq_epi8(_mm_max_epu8(a, b), b)
     }
 
     /// Bitwise OR of two vectors.
+    ///
+    /// # Safety
+    /// Requires the SSE2 target feature (baseline on x86_64).
     #[inline(always)]
     pub unsafe fn or(a: __m128i, b: __m128i) -> __m128i {
         _mm_or_si128(a, b)
@@ -151,6 +190,9 @@ mod imp {
 
     /// Convert a 16-byte comparison result to a 16-bit bitmask.
     /// Bit i is set if the high bit of lane i is set (i.e. lane == 0xFF).
+    ///
+    /// # Safety
+    /// Requires the SSE2 target feature (baseline on x86_64).
     #[inline(always)]
     pub unsafe fn movemask(v: __m128i) -> Mask16 {
         _mm_movemask_epi8(v) as u16
@@ -167,6 +209,10 @@ mod imp {
     #[derive(Clone, Copy)]
     pub struct SimdVec([u8; LANES]);
 
+    /// Load `LANES` bytes from `ptr`.
+    ///
+    /// # Safety
+    /// `ptr` must be valid for reads of `LANES` bytes.
     #[inline(always)]
     pub unsafe fn load(ptr: *const u8) -> SimdVec {
         let mut v = SimdVec([0u8; LANES]);
@@ -174,16 +220,28 @@ mod imp {
         v
     }
 
+    /// Store `LANES` bytes to `ptr`.
+    ///
+    /// # Safety
+    /// `ptr` must be valid for writes of `LANES` bytes.
     #[inline(always)]
     pub unsafe fn store(ptr: *mut u8, v: SimdVec) {
         core::ptr::copy_nonoverlapping(v.0.as_ptr(), ptr, LANES);
     }
 
+    /// Broadcast a single byte to all lanes.
+    ///
+    /// # Safety
+    /// Always safe; `unsafe` only to match the platform intrinsic signatures.
     #[inline(always)]
     pub unsafe fn splat(b: u8) -> SimdVec {
         SimdVec([b; LANES])
     }
 
+    /// Compare equal: result lane = 0xFF where a[i] == b[i], else 0x00.
+    ///
+    /// # Safety
+    /// Always safe; `unsafe` only to match the platform intrinsic signatures.
     #[inline(always)]
     pub unsafe fn cmpeq(a: SimdVec, b: SimdVec) -> SimdVec {
         let mut r = SimdVec([0u8; LANES]);
@@ -193,6 +251,10 @@ mod imp {
         r
     }
 
+    /// Compare less-than-or-equal (unsigned): result lane = 0xFF where a[i] <= b[i].
+    ///
+    /// # Safety
+    /// Always safe; `unsafe` only to match the platform intrinsic signatures.
     #[inline(always)]
     pub unsafe fn cmple(a: SimdVec, b: SimdVec) -> SimdVec {
         let mut r = SimdVec([0u8; LANES]);
@@ -202,6 +264,10 @@ mod imp {
         r
     }
 
+    /// Bitwise OR of two vectors.
+    ///
+    /// # Safety
+    /// Always safe; `unsafe` only to match the platform intrinsic signatures.
     #[inline(always)]
     pub unsafe fn or(a: SimdVec, b: SimdVec) -> SimdVec {
         let mut r = SimdVec([0u8; LANES]);
@@ -211,6 +277,10 @@ mod imp {
         r
     }
 
+    /// Convert a comparison result to a bitmask (bit i set if lane i high bit set).
+    ///
+    /// # Safety
+    /// Always safe; `unsafe` only to match the platform intrinsic signatures.
     #[inline(always)]
     pub unsafe fn movemask(v: SimdVec) -> Mask16 {
         let mut result: u16 = 0;
@@ -479,7 +549,7 @@ pub fn simd_skip_whitespace(bytes: &[u8], start: usize) -> usize {
                 return i;
             }
             // Find first non-whitespace: invert the mask and find first set bit
-            let non_ws = !ws_mask & 0xFFFF;
+            let non_ws = !ws_mask;
             return i + first_set_bit(non_ws) as usize;
         }
     }
@@ -685,5 +755,4 @@ mod tests {
         simd_write_escaped(&mut buf, &[0x01]);
         assert_eq!(buf, b"\"\\u0001\"");
     }
-
 }

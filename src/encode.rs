@@ -274,8 +274,8 @@ fn schema_field_name_needs_quotes(name: &str) -> bool {
     let mut i = 0;
     while i < n {
         let b = bytes[i];
-        let is_digit = b >= b'0' && b <= b'9';
-        let is_alpha = (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z');
+        let is_digit = b.is_ascii_digit();
+        let is_alpha = b.is_ascii_uppercase() || b.is_ascii_lowercase();
         if !(is_alpha || is_digit || b == b'_') {
             return true;
         }
@@ -411,6 +411,14 @@ impl<'a> ser::Serializer for &'a mut Encoder {
 
     #[inline]
     fn serialize_f64(self, v: f64) -> Result<()> {
+        // ASUN text has no representation for NaN/±Infinity, and the decoder
+        // rejects them, so encoding one would produce output that cannot
+        // round-trip. Reject at encode time (matching serde_json's default).
+        if !v.is_finite() {
+            return Err(Error::Message(
+                "cannot serialize non-finite float (NaN/Infinity)".into(),
+            ));
+        }
         self.push_separator();
         if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("float");
@@ -747,13 +755,12 @@ impl<'a> ser::SerializeSeq for SeqEncoder<'a> {
                     if let Some(schema) = has_nested {
                         out.push(b'@');
                         out.extend_from_slice(schema);
-                    } else if self.ser.typed {
-                        if let Some(ref field_types) = self.ser.top_seq_field_types {
-                            if let Some(Some(type_hint)) = field_types.get(i) {
-                                out.push(b'@');
-                                out.extend_from_slice(type_hint.as_bytes());
-                            }
-                        }
+                    } else if self.ser.typed
+                        && let Some(ref field_types) = self.ser.top_seq_field_types
+                        && let Some(Some(type_hint)) = field_types.get(i)
+                    {
+                        out.push(b'@');
+                        out.extend_from_slice(type_hint.as_bytes());
                     }
                 }
                 out.extend_from_slice(b"}]:");
@@ -944,11 +951,11 @@ impl<'a> ser::SerializeStruct for StructEncoder<'a> {
                 if let Some(Some(schema)) = self.field_schemas.get(i) {
                     out.push(b'@');
                     out.extend_from_slice(schema);
-                } else if self.ser.typed {
-                    if let Some(type_hint) = self.field_types.get(i).and_then(|t| *t) {
-                        out.push(b'@');
-                        out.extend_from_slice(type_hint.as_bytes());
-                    }
+                } else if self.ser.typed
+                    && let Some(type_hint) = self.field_types.get(i).and_then(|t| *t)
+                {
+                    out.push(b'@');
+                    out.extend_from_slice(type_hint.as_bytes());
                 }
             }
             out.extend_from_slice(b"}:");
@@ -983,11 +990,11 @@ impl<'a> ser::SerializeStruct for StructEncoder<'a> {
                     if let Some(Some(nested)) = self.field_schemas.get(i) {
                         schema.push(b'@');
                         schema.extend_from_slice(nested);
-                    } else if self.ser.typed {
-                        if let Some(type_hint) = self.field_types.get(i).and_then(|t| *t) {
-                            schema.push(b'@');
-                            schema.extend_from_slice(type_hint.as_bytes());
-                        }
+                    } else if self.ser.typed
+                        && let Some(type_hint) = self.field_types.get(i).and_then(|t| *t)
+                    {
+                        schema.push(b'@');
+                        schema.extend_from_slice(type_hint.as_bytes());
                     }
                 }
                 schema.push(b'}');

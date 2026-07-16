@@ -410,6 +410,12 @@ impl<'de> Deserializer<'de> {
             }
             if self.input[self.pos] == b'\\' {
                 has_escape = true;
+                // A trailing backslash with no following byte is malformed; a
+                // bare `self.pos += 2` would push past the end and panic on the
+                // trim/slice below. Reject it instead.
+                if self.pos + 2 > self.input.len() {
+                    return Err(Error::InvalidEscape('\\'));
+                }
                 self.pos += 2;
             } else {
                 break;
@@ -419,7 +425,16 @@ impl<'de> Deserializer<'de> {
         while end > start && Self::is_layout_byte(self.input[end - 1]) {
             end -= 1;
         }
-        let raw = unsafe { core::str::from_utf8_unchecked(&self.input[start..end]) };
+        // When escapes are present the slice may split a multi-byte UTF-8
+        // sequence (pos advanced by 2 past a `\`), which would make the
+        // `from_utf8_unchecked` reference invalid. Validate in that case; the
+        // no-escape fast path is guaranteed valid because the input is `&str`.
+        let bytes = &self.input[start..end];
+        let raw = if has_escape {
+            core::str::from_utf8(bytes).map_err(|_| Error::InvalidEscape('\\'))?
+        } else {
+            unsafe { core::str::from_utf8_unchecked(bytes) }
+        };
         Ok((raw, has_escape))
     }
 
@@ -571,7 +586,12 @@ impl<'de> Deserializer<'de> {
             if d > 9 {
                 break;
             }
-            val = val.wrapping_mul(10).wrapping_add(d as u64);
+            // Detect overflow instead of silently wrapping; an out-of-range
+            // integer is a decode error, not corrupt data.
+            val = val
+                .checked_mul(10)
+                .and_then(|v| v.checked_add(d as u64))
+                .ok_or(Error::InvalidNumber)?;
             self.pos += 1;
             digits += 1;
         }
@@ -579,8 +599,15 @@ impl<'de> Deserializer<'de> {
             return Err(Error::InvalidNumber);
         }
         if negative {
-            Ok(-(val as i64))
+            // Magnitude fits in i64 (>= -2^63) exactly when val <= 2^63.
+            if val > (i64::MAX as u64) + 1 {
+                return Err(Error::InvalidNumber);
+            }
+            Ok((val as i64).wrapping_neg())
         } else {
+            if val > i64::MAX as u64 {
+                return Err(Error::InvalidNumber);
+            }
             Ok(val as i64)
         }
     }
@@ -595,7 +622,10 @@ impl<'de> Deserializer<'de> {
             if d > 9 {
                 break;
             }
-            val = val.wrapping_mul(10).wrapping_add(d as u64);
+            val = val
+                .checked_mul(10)
+                .and_then(|v| v.checked_add(d as u64))
+                .ok_or(Error::InvalidNumber)?;
             self.pos += 1;
             digits += 1;
         }
@@ -896,7 +926,7 @@ impl<'de> SchemaFields<'de> {
     fn contains_name(&self, target: &str) -> bool {
         match self {
             Self::Cached { .. } => (0..self.len()).any(|index| self.name_at(index) == target),
-            Self::Static(fields) => fields.iter().any(|field| *field == target),
+            Self::Static(fields) => fields.contains(&target),
         }
     }
 
@@ -991,7 +1021,7 @@ fn unescape_plain(s: &str) -> Result<String> {
     Ok(result)
 }
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
+impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     type Error = Error;
 
     #[inline]
@@ -1026,17 +1056,25 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
                 }
                 let digits_start = self.pos;
                 let mut val: u64 = 0;
+                let mut overflow = false;
                 while self.pos < self.input.len() {
                     let d = self.input[self.pos].wrapping_sub(b'0');
                     if d > 9 {
                         break;
                     }
-                    val = val.wrapping_mul(10).wrapping_add(d as u64);
+                    match val.checked_mul(10).and_then(|v| v.checked_add(d as u64)) {
+                        Some(v) => val = v,
+                        None => overflow = true,
+                    }
                     self.pos += 1;
+                }
+                // Also validate the negative magnitude fits in i64.
+                if negative && val > (i64::MAX as u64) + 1 {
+                    overflow = true;
                 }
                 // Check if there's a decimal point or scientific exponent → parse as float
                 let next = self.input.get(self.pos).copied();
-                if matches!(next, Some(b'.') | Some(b'e') | Some(b'E')) {
+                if overflow || matches!(next, Some(b'.') | Some(b'e') | Some(b'E')) {
                     // Reset and parse entire number as float with fast-float
                     self.pos = sign_pos;
                     // If float parsing fails OR leaves trailing junk, fall back
@@ -1706,9 +1744,9 @@ impl<'a, 'de> MapAccess<'de> for AsunStructAccessWithDefaults<'a, 'de> {
                 if self.de.pos < self.de.input.len() && self.de.input[self.de.pos] == b')' {
                     return self.next_key_seed(seed);
                 }
-            } else if self.de.input[self.de.pos] != b')' {
-                return Ok(None);
             } else {
+                // No further comma-separated field: end of the tuple, whether
+                // the current byte is ')' or anything else.
                 return Ok(None);
             }
         }

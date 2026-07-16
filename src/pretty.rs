@@ -115,7 +115,7 @@ impl<'a> PrettyFmt<'a> {
             self.pos += 1;
             if self.pos < self.src.len() {
                 let close = self.mat[self.pos];
-                if close >= 0 && (close as usize) - self.pos + 1 <= PRETTY_MAX_WIDTH {
+                if close >= 0 && (close as usize) - self.pos < PRETTY_MAX_WIDTH {
                     let end = close as usize + 1;
                     self.write_inline(self.pos, end);
                     self.pos = end;

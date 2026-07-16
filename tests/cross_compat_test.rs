@@ -451,7 +451,7 @@ fn cross_target_has_extra_fields() {
     let dst: DstBig = decode(&data).unwrap();
     assert_eq!(dst.id, 42);
     assert_eq!(dst.name, "Alice");
-    assert_eq!(dst.missing, false);
+    assert!(!dst.missing);
     assert_eq!(dst.extra, 0.0);
 }
 
@@ -1073,7 +1073,7 @@ fn cross_typed_schema_mixed_fields() {
     let data = encode_typed(&src).unwrap();
     let dst: DstMixed = decode(&data).unwrap();
     assert_eq!(dst.b, "test");
-    assert_eq!(dst.d, true);
+    assert!(dst.d);
     assert_eq!(dst.extra, 0);
     assert_eq!(dst.more, 0.0);
 }

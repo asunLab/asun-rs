@@ -3,39 +3,38 @@
 //! A high-performance binary encoding for ASUN data structures.
 //! Provides `encode_binary` and `decode_binary` for zero-overhead struct ↔ bytes conversion.
 //!
-//! ## Wire Format (all integers little-endian)
+//! Integers are **LEB128 varint** encoded (with **zigzag** for signed types), which
+//! shrinks integer-heavy payloads substantially when values are small — the common
+//! case for IDs, counts, timestamps, and enum tags.
+//!
+//! ## Wire Format
 //!
 //! ```text
 //! bool      → 1 byte  (0x00=false, 0x01=true)
-//! i8        → 1 byte (signed)
-//! i16       → 2 bytes LE
-//! i32       → 4 bytes LE
-//! i64       → 8 bytes LE
+//! i8        → 1 byte (signed; varint never helps for a single byte)
 //! u8        → 1 byte
-//! u16       → 2 bytes LE
-//! u32       → 4 bytes LE
-//! u64       → 8 bytes LE
-//! f32       → 4 bytes LE (IEEE 754 bit-cast)
+//! i16/i32/i64 → zigzag + LEB128 varint  (1..=10 bytes)
+//! u16/u32/u64 → LEB128 varint           (1..=10 bytes)
+//! f32       → 4 bytes LE (IEEE 754 bit-cast — float bits don't compress)
 //! f64       → 8 bytes LE (IEEE 754 bit-cast)
-//! char      → 4 bytes LE (Unicode scalar as u32)
-//! str       → u32 LE length + UTF-8 bytes  ← ZERO-COPY on decode (&'de str)
-//! bytes     → u32 LE length + raw bytes
+//! char      → uvarint (Unicode scalar as u32)
+//! str       → uvarint length + UTF-8 bytes  ← ZERO-COPY on decode (&'de str)
+//! bytes     → uvarint length + raw bytes
 //! Option<T> → u8 tag (0=None, 1=Some) + [T payload if Some]
-//! Vec<T>    → u32 LE count + [element × count]
+//! Vec<T>    → uvarint count + [element × count]
 //! struct    → fields in declaration order (no length prefix — known from schema)
 //! tuple     → elements in order (no length prefix)
-//! enum      → u32 LE variant_index + [payload for non-unit variants]
+//! enum      → uvarint variant_index + [payload for non-unit variants]
 //! unit      → 0 bytes
 //! newtype   → inner value directly (no wrapper)
 //! ```
 //!
 //! ## Key Features
 //!
+//! - **Compact integers**: LEB128 varint + zigzag; small values cost 1 byte.
 //! - **Zero-copy string decode**: borrowed `&'de str` slices directly reference input bytes.
 //! - **No type tags** for struct fields: schema drives layout (like Protobuf binary, not CBOR).
 //! - **SIMD-accelerated** bulk byte copy for large string payloads (≥ 32 bytes).
-//! - All primitives written/read via `to_le_bytes` / `from_le_bytes` — compiler typically
-//!   emits a single `STR`/`LDR` instruction on aarch64 / `MOV`/`MOV` on x86-64.
 
 use crate::error::{Error, Result};
 use crate::simd;
@@ -46,6 +45,21 @@ use serde::ser::{
     SerializeTupleStruct, SerializeTupleVariant,
 };
 use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// zigzag helpers — map signed integers to unsigned so small magnitudes
+// (positive or negative) encode into few varint bytes.
+// ============================================================================
+
+#[inline(always)]
+fn zigzag_encode(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+
+#[inline(always)]
+fn zigzag_decode(v: u64) -> i64 {
+    ((v >> 1) as i64) ^ -((v & 1) as i64)
+}
 
 // ============================================================================
 // Public API
@@ -89,6 +103,13 @@ pub struct BinaryEncoder {
     pub(crate) buf: Vec<u8>,
 }
 
+impl Default for BinaryEncoder {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BinaryEncoder {
     #[inline]
     pub fn new() -> Self {
@@ -111,39 +132,25 @@ impl BinaryEncoder {
         self.buf.push(v);
     }
 
+    /// LEB128 unsigned varint.
     #[inline(always)]
-    fn write_u16(&mut self, v: u16) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+    fn write_uvarint(&mut self, mut v: u64) {
+        while v >= 0x80 {
+            self.buf.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        self.buf.push(v as u8);
     }
 
+    /// zigzag + LEB128 signed varint.
     #[inline(always)]
-    fn write_u32(&mut self, v: u32) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    #[inline(always)]
-    fn write_u64(&mut self, v: u64) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+    fn write_ivarint(&mut self, v: i64) {
+        self.write_uvarint(zigzag_encode(v));
     }
 
     #[inline(always)]
     fn write_i8(&mut self, v: i8) {
         self.buf.push(v as u8);
-    }
-
-    #[inline(always)]
-    fn write_i16(&mut self, v: i16) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    #[inline(always)]
-    fn write_i32(&mut self, v: i32) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    #[inline(always)]
-    fn write_i64(&mut self, v: i64) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
     #[inline(always)]
@@ -164,11 +171,11 @@ impl BinaryEncoder {
         simd::simd_bulk_extend(&mut self.buf, data);
     }
 
-    /// Write a string: `u32 LE length` + UTF-8 bytes.
+    /// Write a string: `uvarint length` + UTF-8 bytes.
     #[inline]
     fn write_str(&mut self, s: &str) {
         let bytes = s.as_bytes();
-        self.write_u32(bytes.len() as u32);
+        self.write_uvarint(bytes.len() as u64);
         self.write_bytes_raw(bytes);
     }
 }
@@ -203,19 +210,19 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
 
     #[inline]
     fn serialize_i16(self, v: i16) -> Result<()> {
-        self.write_i16(v);
+        self.write_ivarint(v as i64);
         Ok(())
     }
 
     #[inline]
     fn serialize_i32(self, v: i32) -> Result<()> {
-        self.write_i32(v);
+        self.write_ivarint(v as i64);
         Ok(())
     }
 
     #[inline]
     fn serialize_i64(self, v: i64) -> Result<()> {
-        self.write_i64(v);
+        self.write_ivarint(v);
         Ok(())
     }
 
@@ -227,19 +234,19 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
 
     #[inline]
     fn serialize_u16(self, v: u16) -> Result<()> {
-        self.write_u16(v);
+        self.write_uvarint(v as u64);
         Ok(())
     }
 
     #[inline]
     fn serialize_u32(self, v: u32) -> Result<()> {
-        self.write_u32(v);
+        self.write_uvarint(v as u64);
         Ok(())
     }
 
     #[inline]
     fn serialize_u64(self, v: u64) -> Result<()> {
-        self.write_u64(v);
+        self.write_uvarint(v);
         Ok(())
     }
 
@@ -257,7 +264,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
 
     #[inline]
     fn serialize_char(self, v: char) -> Result<()> {
-        self.write_u32(v as u32);
+        self.write_uvarint(v as u64);
         Ok(())
     }
 
@@ -269,7 +276,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
 
     #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
-        self.write_u32(v.len() as u32);
+        self.write_uvarint(v.len() as u64);
         self.write_bytes_raw(v);
         Ok(())
     }
@@ -304,7 +311,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
         variant_index: u32,
         _variant: &'static str,
     ) -> Result<()> {
-        self.write_u32(variant_index);
+        self.write_uvarint(variant_index as u64);
         Ok(())
     }
 
@@ -325,11 +332,12 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
         _variant: &'static str,
         value: &T,
     ) -> Result<()> {
-        self.write_u32(variant_index);
+        self.write_uvarint(variant_index as u64);
         value.serialize(self)
     }
 
-    /// Sequence: write placeholder u32 count (fixed up in `end()`).
+    /// Sequence: count is a uvarint. When the length is known up front we write
+    /// it immediately; otherwise we buffer elements and splice the count on `end()`.
     fn serialize_seq(self, len: Option<usize>) -> Result<BinSeqEnc<'a>> {
         Ok(BinSeqEnc::new(self, len))
     }
@@ -354,7 +362,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
         _variant: &'static str,
         _len: usize,
     ) -> Result<&'a mut BinaryEncoder> {
-        self.write_u32(variant_index);
+        self.write_uvarint(variant_index as u64);
         Ok(self)
     }
 
@@ -363,11 +371,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
     }
 
     /// Struct: fields written in order, no length prefix.
-    fn serialize_struct(
-        self,
-        _name: &'static str,
-        _len: usize,
-    ) -> Result<&'a mut BinaryEncoder> {
+    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<&'a mut BinaryEncoder> {
         Ok(self)
     }
 
@@ -378,7 +382,7 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
         _variant: &'static str,
         _len: usize,
     ) -> Result<&'a mut BinaryEncoder> {
-        self.write_u32(variant_index);
+        self.write_uvarint(variant_index as u64);
         Ok(self)
     }
 
@@ -388,33 +392,39 @@ impl<'a> ser::Serializer for &'a mut BinaryEncoder {
 }
 
 // ============================================================================
-// BinSeqEnc — handles sequences with unknown-at-call-time lengths
+// BinSeqEnc — sequences use a uvarint count.
+//
+// A varint length is variable-width, so unlike a fixed-width placeholder we
+// cannot reserve space and patch it. When the length is known up front we write
+// the count immediately and stream elements directly (fast path). Otherwise we
+// buffer element bytes in scratch and splice the true count in front on `end()`.
 // ============================================================================
 
 pub struct BinSeqEnc<'a> {
     enc: &'a mut BinaryEncoder,
-    /// Byte position in `buf` where the `u32` count placeholder lives.
-    len_pos: usize,
-    count: u32,
+    /// `None` = fast path (count already written, streaming directly into `buf`).
+    /// `Some` = length was unknown; element bytes accumulate here until `end()`.
+    scratch: Option<Vec<u8>>,
+    count: u64,
 }
 
 impl<'a> BinSeqEnc<'a> {
     fn new(enc: &'a mut BinaryEncoder, known_len: Option<usize>) -> Self {
-        let len_pos = enc.buf.len();
-        // Write placeholder — will be fixed up in end()
-        let count = known_len.unwrap_or(0) as u32;
-        enc.write_u32(count);
-        BinSeqEnc {
-            enc,
-            len_pos,
-            count: 0,
+        match known_len {
+            Some(len) => {
+                enc.write_uvarint(len as u64);
+                BinSeqEnc {
+                    enc,
+                    scratch: None,
+                    count: 0,
+                }
+            }
+            None => BinSeqEnc {
+                enc,
+                scratch: Some(Vec::new()),
+                count: 0,
+            },
         }
-    }
-
-    #[inline(always)]
-    fn fix_len(&mut self) {
-        let bytes = self.count.to_le_bytes();
-        self.enc.buf[self.len_pos..self.len_pos + 4].copy_from_slice(&bytes);
     }
 }
 
@@ -425,17 +435,29 @@ impl<'a> SerializeSeq for BinSeqEnc<'a> {
     #[inline]
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<()> {
         self.count += 1;
-        value.serialize(&mut *self.enc)
+        match &mut self.scratch {
+            None => value.serialize(&mut *self.enc),
+            Some(_) => {
+                // Serialize into a temporary encoder, then move bytes into scratch.
+                let mut tmp = BinaryEncoder::with_capacity(16);
+                value.serialize(&mut tmp)?;
+                self.scratch.as_mut().unwrap().extend_from_slice(&tmp.buf);
+                Ok(())
+            }
+        }
     }
 
     #[inline]
-    fn end(mut self) -> Result<()> {
-        self.fix_len();
+    fn end(self) -> Result<()> {
+        if let Some(scratch) = self.scratch {
+            self.enc.write_uvarint(self.count);
+            self.enc.buf.extend_from_slice(&scratch);
+        }
         Ok(())
     }
 }
 
-impl<'a> SerializeTupleVariant for &'a mut BinaryEncoder {
+impl SerializeTupleVariant for &mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -454,7 +476,7 @@ impl<'a> SerializeTupleVariant for &'a mut BinaryEncoder {
 // Tuple / Struct — use &mut BinaryEncoder directly (no count prefix)
 // ============================================================================
 
-impl<'a> SerializeTuple for &'a mut BinaryEncoder {
+impl SerializeTuple for &mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -469,7 +491,7 @@ impl<'a> SerializeTuple for &'a mut BinaryEncoder {
     }
 }
 
-impl<'a> SerializeTupleStruct for &'a mut BinaryEncoder {
+impl SerializeTupleStruct for &mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -484,7 +506,7 @@ impl<'a> SerializeTupleStruct for &'a mut BinaryEncoder {
     }
 }
 
-impl<'a> SerializeStruct for &'a mut BinaryEncoder {
+impl SerializeStruct for &mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -503,7 +525,7 @@ impl<'a> SerializeStruct for &'a mut BinaryEncoder {
     }
 }
 
-impl<'a> SerializeStructVariant for &'a mut BinaryEncoder {
+impl SerializeStructVariant for &mut BinaryEncoder {
     type Ok = ();
     type Error = Error;
 
@@ -543,7 +565,11 @@ impl<'de> BinaryDecoder<'de> {
 
     #[inline(always)]
     fn ensure(&self, n: usize) -> Result<()> {
-        if self.pos + n <= self.data.len() {
+        // `self.pos + n` can overflow `usize` for an attacker-controlled varint
+        // length, wrapping to a small value that wrongly passes the check and
+        // then panics on the subsequent slice. Compare against remaining bytes
+        // instead so the arithmetic can never overflow.
+        if n <= self.data.len() - self.pos {
             Ok(())
         } else {
             Err(Error::Eof)
@@ -558,28 +584,28 @@ impl<'de> BinaryDecoder<'de> {
         Ok(v)
     }
 
+    /// LEB128 unsigned varint. Rejects overlong (> 64-bit) encodings.
     #[inline(always)]
-    fn read_u16(&mut self) -> Result<u16> {
-        self.ensure(2)?;
-        let v = u16::from_le_bytes(self.data[self.pos..self.pos + 2].try_into().unwrap());
-        self.pos += 2;
-        Ok(v)
+    fn read_uvarint(&mut self) -> Result<u64> {
+        let mut result: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            let byte = self.read_u8()?;
+            if shift >= 64 {
+                return Err(Error::Message("varint overflow".into()));
+            }
+            result |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
     }
 
+    /// zigzag + LEB128 signed varint.
     #[inline(always)]
-    fn read_u32(&mut self) -> Result<u32> {
-        self.ensure(4)?;
-        let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        Ok(v)
-    }
-
-    #[inline(always)]
-    fn read_u64(&mut self) -> Result<u64> {
-        self.ensure(8)?;
-        let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-        self.pos += 8;
-        Ok(v)
+    fn read_ivarint(&mut self) -> Result<i64> {
+        Ok(zigzag_decode(self.read_uvarint()?))
     }
 
     #[inline(always)]
@@ -588,41 +614,31 @@ impl<'de> BinaryDecoder<'de> {
     }
 
     #[inline(always)]
-    fn read_i16(&mut self) -> Result<i16> {
-        self.ensure(2)?;
-        let v = i16::from_le_bytes(self.data[self.pos..self.pos + 2].try_into().unwrap());
-        self.pos += 2;
-        Ok(v)
-    }
-
-    #[inline(always)]
-    fn read_i32(&mut self) -> Result<i32> {
+    fn read_u32_le(&mut self) -> Result<u32> {
         self.ensure(4)?;
-        let v = i32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
+        let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
         self.pos += 4;
         Ok(v)
     }
 
     #[inline(always)]
-    fn read_i64(&mut self) -> Result<i64> {
+    fn read_u64_le(&mut self) -> Result<u64> {
         self.ensure(8)?;
-        let v = i64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+        let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
         self.pos += 8;
         Ok(v)
     }
 
     #[inline(always)]
     fn read_f32(&mut self) -> Result<f32> {
-        // Bit-cast: read 4 bytes, interpret as IEEE-754 float32
-        let bits = self.read_u32()?;
-        Ok(f32::from_bits(bits))
+        // Bit-cast: read 4 fixed LE bytes, interpret as IEEE-754 float32
+        Ok(f32::from_bits(self.read_u32_le()?))
     }
 
     #[inline(always)]
     fn read_f64(&mut self) -> Result<f64> {
-        // Bit-cast: read 8 bytes, interpret as IEEE-754 float64
-        let bits = self.read_u64()?;
-        Ok(f64::from_bits(bits))
+        // Bit-cast: read 8 fixed LE bytes, interpret as IEEE-754 float64
+        Ok(f64::from_bits(self.read_u64_le()?))
     }
 
     /// Read string **without allocation** — returns a `&'de str` borrowing `data`.
@@ -631,18 +647,19 @@ impl<'de> BinaryDecoder<'de> {
     /// only for the `u32` length read + a bounds check.
     #[inline]
     fn read_str_zerocopy(&mut self) -> Result<&'de str> {
-        let len = self.read_u32()? as usize;
+        let len = self.read_uvarint()? as usize;
         self.ensure(len)?;
         let bytes = &self.data[self.pos..self.pos + len];
         self.pos += len;
-        // SAFETY: serializer always writes valid UTF-8 (from Rust &str/String)
-        Ok(unsafe { core::str::from_utf8_unchecked(bytes) })
+        // The input may be untrusted binary, so validate rather than assume
+        // well-formed UTF-8; an invalid slice would otherwise be UB.
+        core::str::from_utf8(bytes).map_err(|_| Error::Message("invalid utf-8".into()))
     }
 
     /// Read raw bytes slice — zero-copy borrow of input.
     #[inline]
     fn read_bytes_zerocopy(&mut self) -> Result<&'de [u8]> {
-        let len = self.read_u32()? as usize;
+        let len = self.read_uvarint()? as usize;
         self.ensure(len)?;
         let bytes = &self.data[self.pos..self.pos + len];
         self.pos += len;
@@ -654,7 +671,7 @@ impl<'de> BinaryDecoder<'de> {
 // serde::Deserializer impl
 // ============================================================================
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
+impl<'de> de::Deserializer<'de> for &mut BinaryDecoder<'de> {
     type Error = Error;
 
     /// Binary format is NOT self-describing — type tags are absent.
@@ -677,17 +694,17 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
 
     #[inline]
     fn deserialize_i16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i16(self.read_i16()?)
+        visitor.visit_i16(self.read_ivarint()? as i16)
     }
 
     #[inline]
     fn deserialize_i32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i32(self.read_i32()?)
+        visitor.visit_i32(self.read_ivarint()? as i32)
     }
 
     #[inline]
     fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_i64(self.read_i64()?)
+        visitor.visit_i64(self.read_ivarint()?)
     }
 
     #[inline]
@@ -697,17 +714,17 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
 
     #[inline]
     fn deserialize_u16<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u16(self.read_u16()?)
+        visitor.visit_u16(self.read_uvarint()? as u16)
     }
 
     #[inline]
     fn deserialize_u32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u32(self.read_u32()?)
+        visitor.visit_u32(self.read_uvarint()? as u32)
     }
 
     #[inline]
     fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        visitor.visit_u64(self.read_u64()?)
+        visitor.visit_u64(self.read_uvarint()?)
     }
 
     #[inline]
@@ -722,7 +739,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
 
     #[inline]
     fn deserialize_char<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        let cp = self.read_u32()?;
+        let cp = self.read_uvarint()? as u32;
         let c = char::from_u32(cp)
             .ok_or_else(|| Error::Message(format!("invalid char codepoint: {cp}")))?;
         visitor.visit_char(c)
@@ -788,9 +805,9 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut BinaryDecoder<'de> {
         visitor.visit_newtype_struct(self)
     }
 
-    /// Sequence: read `u32 LE` count, then deliver elements via `SeqAccess`.
+    /// Sequence: read uvarint count, then deliver elements via `SeqAccess`.
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        let count = self.read_u32()? as usize;
+        let count = self.read_uvarint()? as usize;
         visitor.visit_seq(BinSeqAccess::new(self, count))
     }
 
@@ -896,8 +913,8 @@ impl<'de, 'a> EnumAccess<'de> for BinEnumAccess<'a, 'de> {
         self,
         seed: V,
     ) -> Result<(V::Value, BinVariantAccess<'a, 'de>)> {
-        // variant index encoded as u32 LE
-        let idx = self.de.read_u32()?;
+        // variant index encoded as uvarint
+        let idx = self.de.read_uvarint()? as u32;
         let val = seed.deserialize(de::value::U32Deserializer::new(idx))?;
         Ok((val, BinVariantAccess { de: self.de }))
     }

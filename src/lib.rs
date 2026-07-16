@@ -300,10 +300,7 @@ mod tests {
         };
 
         let untyped = encode(&value).unwrap();
-        assert_eq!(
-            untyped,
-            "{\"id uuid\",\"65\",\"{}[]@\\\"\"}:(1,Alice,true)"
-        );
+        assert_eq!(untyped, "{\"id uuid\",\"65\",\"{}[]@\\\"\"}:(1,Alice,true)");
         assert_eq!(decode::<Weird>(&untyped).unwrap(), value);
 
         let typed = encode_typed(&value).unwrap();

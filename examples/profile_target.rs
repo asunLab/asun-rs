@@ -160,7 +160,9 @@ fn generate_companies(n: usize) -> Vec<Company> {
 }
 
 fn main() {
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "encode_alltypes".into());
+    let arg = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "encode_alltypes".into());
     let iters: usize = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -214,7 +216,9 @@ fn main() {
         }
         other => {
             eprintln!("unknown subcommand: {other}");
-            eprintln!("valid: encode_user, encode_alltypes, encode_deep, decode_user, decode_alltypes, decode_deep");
+            eprintln!(
+                "valid: encode_user, encode_alltypes, encode_deep, decode_user, decode_alltypes, decode_deep"
+            );
             std::process::exit(2);
         }
     }
