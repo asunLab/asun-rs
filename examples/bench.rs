@@ -1,4 +1,4 @@
-use asun::{decode, decode_binary, encode, encode_binary, encode_typed};
+use asun::{AsunDecode, AsunEncode, decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -6,7 +6,7 @@ use std::time::Instant;
 // 1. Flat struct (8 fields) — original benchmark
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct User {
     id: i64,
     name: String,
@@ -22,7 +22,7 @@ struct User {
 // 2. All-types struct — covers every ASUN primitive/compound
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct AllTypes {
     b: bool,
     i8v: i8,
@@ -46,7 +46,7 @@ struct AllTypes {
 // 3. 5-level deep struct: Company > Division > Team > Project > Task
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Task {
     id: i64,
     title: String,
@@ -55,7 +55,7 @@ struct Task {
     hours: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Project {
     name: String,
     budget: f64,
@@ -63,7 +63,7 @@ struct Project {
     tasks: Vec<Task>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Team {
     name: String,
     lead: String,
@@ -71,7 +71,7 @@ struct Team {
     projects: Vec<Project>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Division {
     name: String,
     location: String,
@@ -79,7 +79,7 @@ struct Division {
     teams: Vec<Team>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Company {
     name: String,
     founded: i64,

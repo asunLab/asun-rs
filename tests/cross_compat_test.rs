@@ -1,11 +1,11 @@
+use asun::{AsunDecode, AsunEncode};
 use asun::{decode, encode, encode_typed};
-use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Dimension 1: Extra trailing fields — source has more fields than target
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct FullUser {
     id: i64,
     name: String,
@@ -14,7 +14,7 @@ struct FullUser {
     score: f64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MiniUser {
     id: i64,
     name: String,
@@ -81,13 +81,13 @@ fn cross_trailing_fields_dropped_single() {
 // Dimension 2: Trailing field is complex (array, entry list)
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct MetaEntry {
     key: String,
     value: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct RichProfile {
     id: i64,
     name: String,
@@ -96,7 +96,7 @@ struct RichProfile {
     meta: Vec<MetaEntry>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct ThinProfile {
     id: i64,
     name: String,
@@ -135,7 +135,7 @@ fn cross_skip_trailing_array_and_entry_list() {
 // Dimension 3: Nested struct — inner has fewer fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct InnerFull {
     x: i64,
     y: i64,
@@ -143,20 +143,20 @@ struct InnerFull {
     w: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct OuterFull {
     name: String,
     inner: InnerFull,
     flag: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct InnerThin {
     x: i64,
     y: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct OuterThin {
     name: String,
     inner: InnerThin,
@@ -189,7 +189,7 @@ fn cross_nested_struct_fewer_fields() {
 // Dimension 4: Vec of nested structs — inner has extra fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct TaskFull {
     title: String,
     done: bool,
@@ -197,19 +197,19 @@ struct TaskFull {
     weight: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct ProjectFull {
     name: String,
     tasks: Vec<TaskFull>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct TaskThin {
     title: String,
     done: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct ProjectThin {
     name: String,
     tasks: Vec<TaskThin>,
@@ -272,14 +272,14 @@ fn cross_vec_nested_struct_skip_extra() {
 // Dimension 5: Deep 3-level nesting, each level drops fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct L3Full {
     a: i64,
     b: String,
     c: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct L2Full {
     name: String,
     sub: L3Full,
@@ -287,25 +287,25 @@ struct L2Full {
     tags: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct L1Full {
     id: i64,
     child: L2Full,
     extra: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct L3Thin {
     a: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct L2Thin {
     name: String,
     sub: L3Thin,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct L1Thin {
     id: i64,
     child: L2Thin,
@@ -345,14 +345,14 @@ fn cross_deep_nesting_3_levels() {
 // Dimension 6: Field reorder
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct OrderABC {
     a: i64,
     b: String,
     c: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct OrderCAB {
     c: bool,
     a: i64,
@@ -382,7 +382,7 @@ fn cross_field_reorder() {
 // Dimension 7: Reorder + drop trailing
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct BigRecord {
     id: i64,
     name: String,
@@ -391,7 +391,7 @@ struct BigRecord {
     level: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct SmallReordered {
     score: f64,
     id: i64,
@@ -426,14 +426,14 @@ fn cross_reorder_plus_drop_trailing() {
 // Dimension 8: Target has extra fields (zero-value)
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcSmall {
     id: i64,
     name: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Default)]
-#[serde(default)]
+#[derive(Debug, AsunDecode, PartialEq, Default)]
+#[asun(default)]
 struct DstBig {
     id: i64,
     name: String,
@@ -459,7 +459,7 @@ fn cross_target_has_extra_fields() {
 // Dimension 9: Optional fields across compat
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcWithOptionals {
     id: i64,
     label: Option<String>,
@@ -467,7 +467,7 @@ struct SrcWithOptionals {
     flag: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstFewerOptionals {
     id: i64,
     label: Option<String>,
@@ -509,14 +509,14 @@ fn cross_optional_nil_skip_trailing() {
 // Dimension 10: Quoted strings with special chars in trailing
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcSpecialStr {
     id: i64,
     name: String,
     bio: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstNoStr {
     id: i64,
 }
@@ -537,14 +537,14 @@ fn cross_skip_quoted_string_special_chars() {
 // Dimension 11: Skip trailing array fields in vec
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcNestedArray {
     id: i64,
     matrix: Vec<i64>,
     tags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstNestedArrayThin {
     id: i64,
 }
@@ -574,14 +574,14 @@ fn cross_skip_trailing_array_fields() {
 // Dimension 12: Int widening (text is the same for int32/int64)
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcNarrow {
     id: i32,
     score: i32,
     name: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstWide {
     id: i64,
     score: i64,
@@ -611,7 +611,7 @@ fn cross_int_widening() {
 // Dimension 13: Float roundtrip precision
 // ============================================================================
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, AsunEncode, AsunDecode)]
 struct SrcFloats {
     id: i64,
     value: f64,
@@ -632,7 +632,7 @@ fn cross_float_roundtrip() {
 // Dimension 14: Negative numbers, skip trailing
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcNegative {
     a: i64,
     b: i64,
@@ -640,7 +640,7 @@ struct SrcNegative {
     d: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstNegativeThin {
     a: i64,
     b: i64,
@@ -663,14 +663,14 @@ fn cross_negative_numbers_skip_trailing() {
 // Dimension 15: Empty string fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcEmpty {
     id: i64,
     name: String,
     bio: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstEmptyThin {
     id: i64,
 }
@@ -691,14 +691,14 @@ fn cross_empty_string_fields() {
 // Dimension 16: Skip trailing entry list field
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcWithEntries {
     id: i64,
     name: String,
     meta: Vec<MetaEntry>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstNoEntries {
     id: i64,
     name: String,
@@ -784,34 +784,34 @@ fn cross_typed_schema_single_decode() {
 // Dimension 19: Nested vec-of-struct + trailing outer fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct DetailFull {
-    #[serde(rename = "ID")]
+    #[asun(rename = "ID")]
     id: i64,
-    #[serde(rename = "Name")]
+    #[asun(rename = "Name")]
     name: String,
-    #[serde(rename = "Age")]
+    #[asun(rename = "Age")]
     age: i32,
-    #[serde(rename = "Gender")]
+    #[asun(rename = "Gender")]
     gender: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct UserFull {
     details: Vec<DetailFull>,
     code: i64,
     label: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct PersonThin {
-    #[serde(rename = "ID")]
+    #[asun(rename = "ID")]
     id: i64,
-    #[serde(rename = "Name")]
+    #[asun(rename = "Name")]
     name: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct HumanThin {
     details: Vec<PersonThin>,
 }
@@ -860,7 +860,7 @@ fn cross_nested_vec_plus_trailing_outer() {
 // Dimension 20: Skip trailing bools
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcBools {
     id: i64,
     a: bool,
@@ -868,7 +868,7 @@ struct SrcBools {
     c: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstBoolsThin {
     id: i64,
 }
@@ -900,7 +900,7 @@ fn cross_skip_trailing_bools() {
 // Dimension 21: Pick middle field only
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcFiveFields {
     a: i64,
     b: String,
@@ -909,7 +909,7 @@ struct SrcFiveFields {
     e: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstMiddleOnly {
     c: f64,
 }
@@ -932,7 +932,7 @@ fn cross_pick_middle_field_only() {
 // Dimension 22: Pick last field only
 // ============================================================================
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstLastOnly {
     e: i64,
 }
@@ -955,14 +955,14 @@ fn cross_pick_last_field_only() {
 // Dimension 23: No overlapping fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcAlpha {
     x: i64,
     y: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Default)]
-#[serde(default)]
+#[derive(Debug, AsunDecode, PartialEq, Default)]
+#[asun(default)]
 struct DstBeta {
     p: i64,
     q: String,
@@ -984,7 +984,7 @@ fn cross_no_overlapping_fields() {
 // Dimension 24: Nested array of structs with extra fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct WorkerFull {
     name: String,
     skills: Vec<String>,
@@ -992,20 +992,20 @@ struct WorkerFull {
     rating: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct TeamFull2 {
     lead: String,
     workers: Vec<WorkerFull>,
     budget: f64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct WorkerThin {
     name: String,
     skills: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct TeamThin2 {
     lead: String,
     workers: Vec<WorkerThin>,
@@ -1045,7 +1045,7 @@ fn cross_nested_array_of_structs_extra_fields() {
 // Dimension 25: Typed schema with mixed match/missing fields
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcTyped {
     a: i64,
     b: String,
@@ -1053,8 +1053,8 @@ struct SrcTyped {
     d: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Default)]
-#[serde(default)]
+#[derive(Debug, AsunDecode, PartialEq, Default)]
+#[asun(default)]
 struct DstMixed {
     b: String,
     d: bool,
@@ -1082,7 +1082,7 @@ fn cross_typed_schema_mixed_fields() {
 // Dimension 26: Many trailing fields (10→1)
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcWide {
     f1: i64,
     f2: String,
@@ -1096,7 +1096,7 @@ struct SrcWide {
     f10: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstNarrow {
     f1: i64,
 }
@@ -1149,14 +1149,14 @@ fn cross_vec_single_row() {
 // Dimension 28: ASUN-like syntax in strings
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcAsunLike {
     id: i64,
     data: String,
     code: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstAsunLikeThin {
     id: i64,
 }
@@ -1177,14 +1177,14 @@ fn cross_skip_string_containing_asun_syntax() {
 // Dimension 29: Unicode in trailing
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcUnicode {
     id: i64,
     name: String,
     bio: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstUnicodeThin {
     id: i64,
 }
@@ -1205,15 +1205,15 @@ fn cross_skip_unicode_in_trailing() {
 // Dimension 30: Roundtrip A→B→A
 // ============================================================================
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
-#[serde(default)]
+#[derive(Debug, AsunEncode, AsunDecode, PartialEq, Default)]
+#[asun(default)]
 struct VersionA {
     id: i64,
     name: String,
     active: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
 struct VersionB {
     id: i64,
     name: String,
@@ -1254,14 +1254,14 @@ fn cross_roundtrip_abba() {
 // Dimension 31: Empty arrays in middle field
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcWithArr {
     id: i64,
     items: Vec<String>,
     score: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstWithArrThin {
     id: i64,
     items: Vec<String>,
@@ -1304,20 +1304,20 @@ fn cross_empty_array_in_middle_field() {
 // Dimension 32: Skip nested struct as tuple
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct InnerForSkip {
     a: i64,
     b: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, AsunEncode)]
 struct SrcWithNested {
     id: i64,
     inner: InnerForSkip,
     tail: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct DstFlat {
     id: i64,
 }

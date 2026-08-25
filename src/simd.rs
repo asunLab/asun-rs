@@ -70,7 +70,7 @@ mod imp {
         unsafe { vdupq_n_u8(b) }
     }
 
-    /// Compare equal: result lane = 0xFF where a[i] == b[i], else 0x00.
+    /// Compare equal: result lane = 0xFF where `a[i] == b[i]`, else 0x00.
     ///
     /// # Safety
     /// Requires the NEON target feature (always present on aarch64).
@@ -79,7 +79,7 @@ mod imp {
         unsafe { vceqq_u8(a, b) }
     }
 
-    /// Compare less-than-or-equal (unsigned): result lane = 0xFF where a[i] <= b[i].
+    /// Compare less-than-or-equal (unsigned): result lane = 0xFF where `a[i] <= b[i]`.
     ///
     /// # Safety
     /// Requires the NEON target feature (always present on aarch64).
@@ -160,7 +160,7 @@ mod imp {
         _mm_set1_epi8(b as i8)
     }
 
-    /// Compare equal: result lane = 0xFF where a[i] == b[i], else 0x00.
+    /// Compare equal: result lane = 0xFF where `a[i] == b[i]`, else 0x00.
     ///
     /// # Safety
     /// Requires the SSE2 target feature (baseline on x86_64).
@@ -238,7 +238,7 @@ mod imp {
         SimdVec([b; LANES])
     }
 
-    /// Compare equal: result lane = 0xFF where a[i] == b[i], else 0x00.
+    /// Compare equal: result lane = 0xFF where `a[i] == b[i]`, else 0x00.
     ///
     /// # Safety
     /// Always safe; `unsafe` only to match the platform intrinsic signatures.
@@ -251,7 +251,7 @@ mod imp {
         r
     }
 
-    /// Compare less-than-or-equal (unsigned): result lane = 0xFF where a[i] <= b[i].
+    /// Compare less-than-or-equal (unsigned): result lane = 0xFF where `a[i] <= b[i]`.
     ///
     /// # Safety
     /// Always safe; `unsafe` only to match the platform intrinsic signatures.
@@ -296,22 +296,110 @@ mod imp {
 pub use imp::*;
 
 // ============================================================================
+// SWAR (SIMD-within-a-register) helpers
+// ============================================================================
+//
+// ASUN's compact output is dominated by *short* tokens: field values are
+// usually well under 16 bytes, so the 128-bit loops below never execute a
+// single iteration and the only thing they cost is vector-constant setup.
+// Probing the first 8-byte word with plain integer arithmetic answers the
+// common case with no vector registers at all.
+
+const LO_BITS: u64 = 0x0101_0101_0101_0101;
+const HI_BITS: u64 = 0x8080_8080_8080_8080;
+
+/// Marks the lowest byte of each zero byte in `x`.
+#[inline(always)]
+fn zero_byte_mask(x: u64) -> u64 {
+    x.wrapping_sub(LO_BITS) & !x & HI_BITS
+}
+
+/// Marks each byte of `word` equal to `b`.
+#[inline(always)]
+fn eq_byte_mask(word: u64, b: u8) -> u64 {
+    zero_byte_mask(word ^ (LO_BITS.wrapping_mul(b as u64)))
+}
+
+/// Marks each byte of `word` that is `<= b` (unsigned, `b < 0x80`).
+///
+/// A borrow out of byte *i* can only happen when byte *i* itself matched, so
+/// the *lowest* marked byte is always a true hit — which is all the callers
+/// (`trailing_zeros`) ever look at.
+#[inline(always)]
+fn le_byte_mask(word: u64, b: u8) -> u64 {
+    word.wrapping_sub(LO_BITS.wrapping_mul(b as u64 + 1)) & !word & HI_BITS
+}
+
+#[inline(always)]
+fn word_at(bytes: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap())
+}
+
+/// Byte offset of the lowest marked byte in a SWAR mask.
+#[inline(always)]
+fn first_marked_byte(mask: u64) -> usize {
+    (mask.trailing_zeros() >> 3) as usize
+}
+
+// ============================================================================
 // High-level SIMD string operations
 // ============================================================================
 
-/// SIMD-accelerated check: does `s` contain any byte that needs ASUN quoting?
-/// Checks for: control chars (<=0x1f), space, comma, at-sign, parens, brackets,
-/// braces, colon, angle brackets, slash, asterisk, double-quote, backslash.
+/// Bytes that force an ASUN string to be quoted.
+static NEEDS_QUOTE: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut j = 0usize;
+    while j < 33 {
+        // 0x00..=0x1f plus 0x20 (space)
+        t[j] = true;
+        j += 1;
+    }
+    t[b',' as usize] = true;
+    t[b'@' as usize] = true;
+    t[b'(' as usize] = true;
+    t[b')' as usize] = true;
+    t[b'[' as usize] = true;
+    t[b']' as usize] = true;
+    t[b'{' as usize] = true;
+    t[b'}' as usize] = true;
+    t[b':' as usize] = true;
+    t[b'<' as usize] = true;
+    t[b'>' as usize] = true;
+    t[b'/' as usize] = true;
+    t[b'*' as usize] = true;
+    t[b'"' as usize] = true;
+    t[b'\\' as usize] = true;
+    t[0x7f] = true;
+    t
+};
+
+/// Offset of the first byte requiring ASUN quoting, or `bytes.len()` if there
+/// is none.
 ///
-/// Returns `true` if any special byte is found.
+/// Returning the offset rather than a bool lets the caller skip re-scanning the
+/// clean prefix when it goes on to escape the string — escape-worthy bytes are
+/// a subset of quote-worthy ones, so everything before this index is known to
+/// be copyable verbatim.
 #[inline]
-pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
+pub fn simd_find_special(bytes: &[u8]) -> usize {
     let len = bytes.len();
     let mut i = 0;
 
+    // Short strings (names, enum tags, city names…) are the overwhelming
+    // majority; go straight to the table scan and skip all vector setup.
+    if len < LANES {
+        while i < len {
+            if NEEDS_QUOTE[bytes[i] as usize] {
+                return i;
+            }
+            i += 1;
+        }
+        return len;
+    }
+
     unsafe {
-        let v_1f = splat(0x1f);
-        let v_space = splat(b' ');
+        let v_20 = splat(0x20);
+        let v_del = splat(0x7f);
         let v_comma = splat(b',');
         let v_at = splat(b'@');
         let v_lparen = splat(b'(');
@@ -333,7 +421,7 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
             let mask = movemask(or(
                 or(
                     or(
-                        or(cmple(chunk, v_1f), cmpeq(chunk, v_space)),
+                        or(cmple(chunk, v_20), cmpeq(chunk, v_del)),
                         or(
                             or(cmpeq(chunk, v_comma), cmpeq(chunk, v_at)),
                             or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
@@ -356,47 +444,25 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
                 ),
             ));
             if mask != 0 {
-                return true;
+                return i + first_set_bit(mask) as usize;
             }
             i += LANES;
         }
     }
 
-    // Scalar tail
-    static NEEDS_QUOTE: [bool; 256] = {
-        let mut t = [false; 256];
-        let mut j = 0usize;
-        while j < 33 {
-            // 0x00..=0x1f plus 0x20 (space)
-            t[j] = true;
-            j += 1;
-        }
-        t[b',' as usize] = true;
-        t[b'@' as usize] = true;
-        t[b'(' as usize] = true;
-        t[b')' as usize] = true;
-        t[b'[' as usize] = true;
-        t[b']' as usize] = true;
-        t[b'{' as usize] = true;
-        t[b'}' as usize] = true;
-        t[b':' as usize] = true;
-        t[b'<' as usize] = true;
-        t[b'>' as usize] = true;
-        t[b'/' as usize] = true;
-        t[b'*' as usize] = true;
-        t[b'"' as usize] = true;
-        t[b'\\' as usize] = true;
-        t[0x7f] = true;
-        t
-    };
-
     while i < len {
         if NEEDS_QUOTE[bytes[i] as usize] {
-            return true;
+            return i;
         }
         i += 1;
     }
-    false
+    len
+}
+
+/// SIMD-accelerated check: does `s` contain any byte that needs ASUN quoting?
+#[inline]
+pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
+    simd_find_special(bytes) < bytes.len()
 }
 
 /// SIMD-accelerated: find first byte needing escape in a string being serialized.
@@ -407,6 +473,19 @@ pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
 pub fn simd_find_escape(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
     let mut i = start;
+
+    // Probe the first word without touching vector registers.
+    if i + 8 <= len {
+        let w = word_at(bytes, i);
+        let m = le_byte_mask(w, 0x1f)
+            | eq_byte_mask(w, b'"')
+            | eq_byte_mask(w, b'\\')
+            | eq_byte_mask(w, 0x7f);
+        if m != 0 {
+            return i + first_marked_byte(m);
+        }
+        i += 8;
+    }
 
     // Escape table: bytes that need escaping during serialization
     // " (0x22), \ (0x5C), control chars (0x00-0x1F), DEL (0x7F)
@@ -452,6 +531,15 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
     let mut i = start;
 
+    if i + 8 <= len {
+        let w = word_at(bytes, i);
+        let m = eq_byte_mask(w, b'"') | eq_byte_mask(w, b'\\');
+        if m != 0 {
+            return i + first_marked_byte(m);
+        }
+        i += 8;
+    }
+
     unsafe {
         let v_quote = splat(b'"');
         let v_backslash = splat(b'\\');
@@ -485,6 +573,21 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
 pub fn simd_find_plain_delimiter(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
     let mut i = start;
+
+    // Values are short and delimiter-terminated, so this word almost always
+    // contains the answer; the vector loop below is the rare case.
+    if i + 8 <= len {
+        let w = word_at(bytes, i);
+        let m = eq_byte_mask(w, b',')
+            | eq_byte_mask(w, b')')
+            | eq_byte_mask(w, b']')
+            | eq_byte_mask(w, b':')
+            | eq_byte_mask(w, b'\\');
+        if m != 0 {
+            return i + first_marked_byte(m);
+        }
+        i += 8;
+    }
 
     unsafe {
         let v_comma = splat(b',');
@@ -570,6 +673,17 @@ pub fn simd_skip_whitespace(bytes: &[u8], start: usize) -> usize {
 /// Returns the number of bytes written.
 #[inline]
 pub fn simd_write_escaped(buf: &mut Vec<u8>, s: &[u8]) {
+    simd_write_escaped_from(buf, s, 0)
+}
+
+/// Like [`simd_write_escaped`], but the caller has already established that
+/// `s[..first]` contains nothing that needs escaping.
+///
+/// The quoting decision scans for a superset of the escape set, so its result
+/// tells us how much of the string can be copied verbatim — without this the
+/// string would be scanned twice end to end.
+#[inline]
+pub fn simd_write_escaped_from(buf: &mut Vec<u8>, s: &[u8], first: usize) {
     /// Escape lookup: maps byte → (replacement_char, 0 if no shortcut)
     static ESCAPE: [u8; 256] = {
         let mut t = [0u8; 256];
@@ -583,10 +697,13 @@ pub fn simd_write_escaped(buf: &mut Vec<u8>, s: &[u8]) {
         t
     };
 
+    let len = s.len();
+    buf.reserve(len + 2);
     buf.push(b'"');
 
-    let len = s.len();
-    let mut start = 0;
+    let first = first.min(len);
+    buf.extend_from_slice(&s[..first]);
+    let mut start = first;
 
     // Use SIMD to scan for bytes that need escaping
     while start < len {
@@ -621,7 +738,7 @@ pub fn simd_write_escaped(buf: &mut Vec<u8>, s: &[u8]) {
 // SIMD-accelerated bulk memory copy (used by binary serializer)
 // ============================================================================
 
-/// SIMD-accelerated bulk copy: append `src` bytes into `dst` Vec<u8>.
+/// SIMD-accelerated bulk copy: append `src` bytes into `dst` `Vec<u8>`.
 ///
 /// For payloads ≥ 32 bytes, copies 16 bytes per iteration using platform SIMD
 /// `load` + `store`, reducing loop overhead and enabling hardware memory

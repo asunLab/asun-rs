@@ -1,3 +1,126 @@
+//! # ASUN — Array-Schema Unified Notation
+//!
+//! A high-performance, token-efficient data format that separates a record's
+//! **schema** from its **data**. Where JSON repeats every field name in every
+//! record, ASUN declares the field names once and streams the values as compact
+//! tuples — smaller payloads, fewer LLM tokens, and faster parsing.
+//!
+//! ```text
+//! JSON:  [{"id":1,"name":"Alice","active":true},
+//!         {"id":2,"name":"Bob","active":false}]
+//!
+//! ASUN:  [{id,name,active}]:(1,Alice,true),(2,Bob,false)
+//! ```
+//!
+//! The crate is **serde-free**. Types opt in with the crate's own derive macros,
+//! `#[derive(AsunEncode, AsunDecode)]`, which generate direct, allocation-lean
+//! implementations of the four runtime traits — no visitor indirection.
+//!
+//! ## Formats
+//!
+//! ASUN has two wire formats, both driven by the same derives:
+//!
+//! - **Text** — self-describing `{schema}:(data)` (single value) or
+//!   `[{schema}]:rows` (sequence). Human-readable and diff-friendly. Optionally
+//!   carries scalar type hints (`{id@int,name@str}`).
+//! - **Binary** — compact, schema-less, fixed field order. Supports zero-copy
+//!   decoding: `&str` fields borrow directly from the input buffer.
+//!
+//! ## Quick start
+//!
+//! ```rust
+//! use asun::{AsunEncode, AsunDecode, encode, decode, encode_binary, decode_binary};
+//!
+//! #[derive(Debug, PartialEq, AsunEncode, AsunDecode)]
+//! struct User {
+//!     id: i64,
+//!     name: String,
+//!     active: bool,
+//! }
+//!
+//! # fn main() -> asun::Result<()> {
+//! let user = User { id: 1, name: "Alice".into(), active: true };
+//!
+//! // Text
+//! let text = encode(&user)?;
+//! assert_eq!(text, "{id,name,active}:(1,Alice,true)");
+//! let back: User = decode(&text)?;
+//! assert_eq!(back, user);
+//!
+//! // Binary (byte-for-byte stable, zero-copy decode)
+//! let bytes = encode_binary(&user)?;
+//! let back: User = decode_binary(&bytes)?;
+//! assert_eq!(back, user);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Zero-copy decoding
+//!
+//! Give the type a lifetime and the derive will borrow `&str` fields straight
+//! out of the input instead of allocating a `String` per field — roughly twice
+//! as fast on string-heavy payloads.
+//!
+//! ```rust
+//! use asun::{AsunDecode, decode};
+//!
+//! #[derive(Debug, PartialEq, AsunDecode)]
+//! struct UserRef<'a> {
+//!     id: i64,
+//!     name: &'a str,
+//! }
+//!
+//! # fn main() -> asun::Result<()> {
+//! let text = String::from("{id,name}:(1,Alice)");
+//! let user: UserRef = decode(&text)?;
+//! assert_eq!(user.name, "Alice");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! An escaped string cannot be borrowed (it has to be rebuilt), so `&str`
+//! fields reject those inputs; use `String` when escapes are expected.
+//!
+//! ## Untrusted input
+//!
+//! Decoding is bounded: nesting deeper than [`decode::MAX_DEPTH`] is rejected
+//! rather than allowed to exhaust the stack, and the internal schema cache is
+//! per-thread and capacity-limited so a stream of distinct schemas cannot grow
+//! it without limit.
+//!
+//! ## API surface
+//!
+//! | Function | Purpose |
+//! |---|---|
+//! | [`encode()`] / [`encode_typed()`] | Encode a value to text (plain / type-hinted schema) |
+//! | [`decode()`] | Decode a value from text |
+//! | [`encode_pretty()`] / [`encode_pretty_typed()`] | Multi-line pretty text |
+//! | [`encode_binary()`] / [`decode_binary()`] | Encode / decode the binary format |
+//!
+//! ## Field attributes
+//!
+//! Fields (and enum variants) accept `#[asun(...)]` attributes, aligned with
+//! serde where the format allows:
+//!
+//! - `#[asun(rename = "wire_name")]` — override the field/variant name on the wire.
+//! - `#[asun(skip)]` — never written, never read; decodes to its default.
+//! - `#[asun(skip_serializing)]` — not written; still read when present in text.
+//! - `#[asun(skip_deserializing)]` — not read; always decodes to its default.
+//! - `#[asun(skip_serializing_if = "path")]` — omit from **text** when the
+//!   predicate returns `true`. Ignored by the binary format (it always writes
+//!   the field, to keep fixed-order decoding reliable).
+//! - `#[asun(default = "path")]` — value source for a field skipped on decode;
+//!   falls back to [`Default::default`] when absent.
+//!
+//! Binary skipping is always **symmetric**: because the binary format has no
+//! schema and reads fields in declaration order, a field skipped on one side is
+//! skipped on both. See the `derive` crate docs for the full semantics table.
+//!
+//! The derive macros in `asun-derive` emit fully-qualified `::asun::...` paths so
+//! downstream crates can use them unambiguously. Inside this crate, alias `self`
+//! as `asun` so those same paths resolve when we derive on our own test types.
+extern crate self as asun;
+
 pub mod binary;
 pub mod decode;
 pub mod encode;
@@ -5,18 +128,23 @@ pub mod error;
 pub mod pretty;
 pub mod simd;
 
+pub mod traits;
+
 pub use binary::{decode_binary, encode_binary};
 pub use decode::decode;
 pub use encode::{encode, encode_typed};
 pub use error::{Error, Result};
 pub use pretty::{encode_pretty, encode_pretty_typed, pretty_format};
+pub use traits::{AsunDecode, AsunDecodeBinary, AsunEncode, AsunEncodeBinary};
+
+/// Derive macros for the asun encode/decode traits.
+pub use asun_derive::{AsunDecode, AsunEncode};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct User {
         id: i64,
         name: String,
@@ -91,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_optional_field() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Item {
             id: i64,
             label: Option<String>,
@@ -104,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_array_field() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Tagged {
             name: String,
             tags: Vec<String>,
@@ -116,11 +244,11 @@ mod tests {
 
     #[test]
     fn test_nested_struct() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Dept {
             title: String,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Employee {
             name: String,
             dept: Dept,
@@ -133,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_serialize_vec() {
-        #[derive(Debug, Serialize)]
+        #[derive(Debug, AsunEncode)]
         struct Row {
             id: i64,
             name: String,
@@ -154,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_escape_roundtrip() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Note {
             text: String,
         }
@@ -168,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_at_string_roundtrip_across_apis() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Note {
             text: String,
         }
@@ -196,6 +324,19 @@ mod tests {
 
     #[test]
     fn test_decode_rejects_invalid_schema_types() {
+        // Invalid schema type annotations must be rejected while parsing the
+        // schema, before any field is bound — so the target type is irrelevant.
+        // A permissive struct (all `Option`) accepts any well-formed schema and
+        // lets these fail purely on the bad annotation.
+        #[derive(Debug, AsunDecode, PartialEq)]
+        struct Probe {
+            id: Option<i64>,
+            name: Option<String>,
+            score: Option<f64>,
+            alive: Option<bool>,
+            tags: Option<Vec<String>>,
+            profile: Option<()>,
+        }
         for input in [
             "{id@numx,name@str}:(1,Alice)",
             "{id@int,name@textx}:(1,Alice)",
@@ -204,7 +345,7 @@ mod tests {
             "{tags@[textx]}:([Alice])",
             "{profile@{name@textx}}:((Alice))",
         ] {
-            assert!(decode::<serde_json::Value>(input).is_err(), "{input}");
+            assert!(decode::<Probe>(input).is_err(), "{input}");
         }
     }
 
@@ -224,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_float_field() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Score {
             id: i64,
             value: f64,
@@ -236,12 +377,12 @@ mod tests {
 
     #[test]
     fn test_entry_list_field() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Attr {
             key: String,
             value: i64,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Item {
             name: String,
             attrs: Vec<Attr>,
@@ -283,13 +424,13 @@ mod tests {
 
     #[test]
     fn test_quoted_schema_field_names_across_apis() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Weird {
-            #[serde(rename = "id uuid")]
+            #[asun(rename = "id uuid")]
             id_uuid: i64,
-            #[serde(rename = "65")]
+            #[asun(rename = "65")]
             numeric: String,
-            #[serde(rename = "{}[]@\"")]
+            #[asun(rename = "{}[]@\"")]
             special: bool,
         }
 
@@ -322,12 +463,12 @@ mod tests {
 
     #[test]
     fn test_annotated_nested_struct() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Dept {
             title: String,
             budget: f64,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Employee {
             name: String,
             age: i64,
@@ -347,7 +488,7 @@ mod tests {
 
     #[test]
     fn test_annotated_with_arrays() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Profile {
             name: String,
             scores: Vec<i64>,
@@ -365,12 +506,12 @@ mod tests {
 
     #[test]
     fn test_annotated_entry_list() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Attr {
             key: String,
             value: i64,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Config {
             name: String,
             attrs: Vec<Attr>,
@@ -387,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_annotated_with_optional() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Record {
             id: i64,
             label: Option<String>,
@@ -412,22 +553,22 @@ mod tests {
 
     #[test]
     fn test_annotated_deep_nesting() {
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Task {
             title: String,
             done: bool,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Project {
             name: String,
             tasks: Vec<Task>,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Team {
             lead: String,
             projects: Vec<Project>,
         }
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Company {
             name: String,
             revenue: f64,
@@ -450,7 +591,7 @@ mod tests {
     #[test]
     fn test_annotated_mixed_partial() {
         // Only some fields have type annotations
-        #[derive(Debug, Deserialize, PartialEq)]
+        #[derive(Debug, AsunDecode, PartialEq)]
         struct Mixed {
             id: i64,
             name: String,
@@ -515,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_encode_typed_floats() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Score {
             id: i64,
             value: f64,
@@ -534,7 +675,7 @@ mod tests {
 
     #[test]
     fn test_encode_typed_all_primitives() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct All {
             b: bool,
             i: i64,
@@ -562,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_encode_typed_optional() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Opt {
             id: i64,
             label: Option<String>,
@@ -598,11 +739,11 @@ mod tests {
     #[test]
     fn test_encode_typed_nested_struct() {
         // Nested structs: inner struct becomes a tuple, no type hint on it
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Dept {
             title: String,
         }
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Employee {
             name: String,
             dept: Dept,
@@ -627,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_encode_typed() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
         struct Row {
             id: i64,
             name: String,
@@ -729,19 +870,19 @@ mod tests {
 
     // ─── Typed primitive Vec fields ───────────────────────────────────────
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct WithBoolVec {
         name: String,
         flags: Vec<bool>,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct WithIntVec {
         name: String,
         nums: Vec<i64>,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct WithStrVec {
         name: String,
         tags: Vec<String>,
@@ -810,11 +951,11 @@ mod tests {
 
     // ─── Field names with +/- in decode ──────────────────────────────────
 
-    #[derive(Debug, Deserialize, PartialEq)]
+    #[derive(Debug, AsunDecode, PartialEq)]
     struct PlusMinusFields {
-        #[serde(rename = "lowPriorityEIR+CIR")]
+        #[asun(rename = "lowPriorityEIR+CIR")]
         low_priority: i64,
-        #[serde(rename = "a-b")]
+        #[asun(rename = "a-b")]
         a_b: String,
         name: String,
     }
@@ -834,5 +975,25 @@ mod tests {
         let v: PlusMinusFields = decode(input).unwrap();
         assert_eq!(v.low_priority, 42);
         assert_eq!(v.a_b, "hello");
+    }
+
+    #[test]
+    fn test_decode_nested_array_schema_annotation() {
+        // Array-of-array type hint `@[[]]` must parse (the schema annotation
+        // parser has to recurse through the inner `[`).
+        #[derive(Debug, AsunDecode, PartialEq)]
+        struct Grid {
+            name: String,
+            cells: Vec<Vec<i64>>,
+        }
+        let input = "{name,cells@[[]]}:(g,[[1,2],[3,4,5]])";
+        let v: Grid = decode(input).unwrap();
+        assert_eq!(
+            v,
+            Grid {
+                name: "g".into(),
+                cells: vec![vec![1, 2], vec![3, 4, 5]],
+            }
+        );
     }
 }

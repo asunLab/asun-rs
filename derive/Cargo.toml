@@ -1,0 +1,17 @@
+[package]
+name = "asun-derive"
+version = "1.2.0"
+authors = ["Athan Xiao <athanxiao@gmail.com>"]
+edition = "2024"
+description = "Derive macros for the asun serialization format (AsunEncode / AsunDecode)"
+license = "MIT"
+repository = "https://github.com/asunLab/asun-rs"
+rust-version = "1.95"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3.0.4", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

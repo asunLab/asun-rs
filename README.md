@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/asun/badge.svg)](https://docs.rs/asun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Rust support for [ASUN](https://github.com/asunLab/asun), a schema-driven format for compact structured data with serde-based encoding and decoding.
+Rust support for [ASUN](https://github.com/asunLab/asun), a schema-driven format for compact structured data. Serde-free: types opt in with the crate's own `#[derive(AsunEncode, AsunDecode)]` macros.
 
 [中文文档](https://github.com/asunLab/asun-rs/blob/main/README_CN.md)
 
@@ -39,27 +39,28 @@ ASUN declares the schema **once** and streams data as compact tuples:
 
 ## Highlights
 
-- Serde-based text encoding and decoding
+- Serde-free — its own `#[derive(AsunEncode, AsunDecode)]` macros, no serde dependency
+- Text and binary wire formats from a single pair of derives
+- Zero-copy binary decode (`&str` fields borrow from the input)
 - Current API uses `encode` / `decode`, not the older `to_string` / `from_str` names
 - Optional scalar-hint schema output
-- Pretty text output and binary format
+- Pretty text output
 - Works well for structs, vectors, options, enums, nested data, and entry-list based keyed collections
+- serde-aligned field attributes: `rename`, `skip`, `skip_serializing`, `skip_deserializing`, `skip_serializing_if`, `default`
 
 ## Install
 
 ```toml
 [dependencies]
-asun = "*"
-serde = { version = "1", features = ["derive"] }
+asun = "1.2"
 ```
 
 ## Quick Start
 
 ```rust
-use asun::{decode, encode, encode_typed};
-use serde::{Deserialize, Serialize};
+use asun::{AsunEncode, AsunDecode, decode, encode, encode_typed};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
 struct User {
     id: i64,
     name: String,
@@ -112,6 +113,38 @@ let decoded: Vec<User> = decode_binary(&bin)?;
 | `encode_pretty` / `encode_pretty_typed` | Pretty text output |
 | `encode_binary`                         | Encode to binary   |
 | `decode_binary`                         | Decode from binary |
+
+## Field Attributes
+
+Fields and enum variants accept `#[asun(...)]` attributes, aligned with serde:
+
+| Attribute                          | Effect                                                                       |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| `rename = "name"`                  | Use `name` on the wire instead of the Rust identifier                        |
+| `skip`                             | Never written, never read; decodes to the default                            |
+| `skip_serializing`                 | Not written; still read from text when present                               |
+| `skip_deserializing`               | Not read; always decodes to the default                                      |
+| `skip_serializing_if = "path"`     | Omit from **text** when the predicate `fn(&T) -> bool` returns `true`         |
+| `default = "path"`                 | Value source `fn() -> T` for a field skipped on decode (else `Default`)      |
+
+```rust
+#[derive(AsunEncode, AsunDecode)]
+struct Config {
+    host: String,
+    #[asun(rename = "p")]
+    port: u16,
+    #[asun(skip)]
+    cached: Vec<u8>,
+    #[asun(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+```
+
+**Binary note:** the binary format has no schema and reads fields in declaration
+order, so any skip is forced **symmetric** — a field skipped on one side is
+skipped on both. `skip_serializing_if` is ignored in binary (the field is always
+written) to keep fixed-order decoding reliable. A custom `default` applies only
+to fields skipped on decode (`skip` / `skip_deserializing`).
 
 ## Run Examples
 

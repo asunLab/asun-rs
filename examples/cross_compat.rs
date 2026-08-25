@@ -1,33 +1,33 @@
-use serde::{Deserialize, Serialize};
+use asun::{AsunDecode, AsunEncode};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(AsunEncode, AsunDecode, Debug, PartialEq)]
 struct Detail {
-    #[serde(rename = "ID")]
+    #[asun(rename = "ID")]
     id: i64,
-    #[serde(rename = "Name")]
+    #[asun(rename = "Name")]
     name: String,
-    #[serde(rename = "Age")]
+    #[asun(rename = "Age")]
     age: i32,
-    #[serde(rename = "Gender")]
+    #[asun(rename = "Gender")]
     gender: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(AsunEncode, AsunDecode, Debug, PartialEq)]
 struct User {
     details: Vec<Detail>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(AsunEncode, AsunDecode, Debug, PartialEq)]
 struct Person {
-    #[serde(rename = "ID")]
+    #[asun(rename = "ID")]
     id: i64,
-    #[serde(rename = "Name")]
+    #[asun(rename = "Name")]
     name: String,
-    #[serde(rename = "Age")]
+    #[asun(rename = "Age")]
     age: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(AsunEncode, AsunDecode, Debug, PartialEq)]
 struct Human {
     details: Vec<Person>,
 }

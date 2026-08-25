@@ -1,31 +1,38 @@
-// ---------------------------------------------------------------------------
-// Pretty-print formatter — smart indentation for ASUN output
-// ---------------------------------------------------------------------------
-//
-// Simple structures stay inline:
-//   {name@str, age@int}:(Alice, 30)
-//
-// Complex structures expand with 2-space indentation:
-//   {
-//     id@str,
-//     name@str,
-//     addr@{city@str, zip@int}
-//   }:
-//     (E001, John, (NYC, 10001))
+//! Pretty-printed ASUN text — smart indentation over the compact encoders.
+//!
+//! [`encode_pretty`] / [`encode_pretty_typed`] encode a value and then reflow it;
+//! [`pretty_format`] reflows already-encoded compact ASUN bytes.
+//!
+//! Simple structures stay inline:
+//!
+//! ```text
+//! {name@str, age@int}:(Alice, 30)
+//! ```
+//!
+//! Complex structures expand with 2-space indentation:
+//!
+//! ```text
+//! {
+//!   id@str,
+//!   name@str,
+//!   addr@{city@str, zip@int}
+//! }:
+//!   (E001, John, (NYC, 10001))
+//! ```
 
 use crate::error::Result;
-use serde::Serialize;
+use crate::traits::AsunEncode;
 
 const PRETTY_MAX_WIDTH: usize = 100;
 
 /// Serialize a struct to pretty-formatted ASUN string.
-pub fn encode_pretty<T: Serialize>(value: &T) -> Result<String> {
+pub fn encode_pretty<T: AsunEncode + ?Sized>(value: &T) -> Result<String> {
     let compact = crate::encode::encode(value)?;
     Ok(pretty_format(compact.as_bytes()))
 }
 
 /// Serialize a struct to pretty-formatted ASUN string with type annotations.
-pub fn encode_pretty_typed<T: Serialize>(value: &T) -> Result<String> {
+pub fn encode_pretty_typed<T: AsunEncode + ?Sized>(value: &T) -> Result<String> {
     let compact = crate::encode::encode_typed(value)?;
     Ok(pretty_format(compact.as_bytes()))
 }

@@ -1,7 +1,8 @@
-use asun::{decode, decode_binary, encode, encode_binary, encode_typed};
+use asun::{AsunDecode, AsunEncode, decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
+// `Deserialize` is used by `User` (JSON roundtrip comparison below).
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct User {
     id: i64,
     name: String,
@@ -128,7 +129,8 @@ fn main() {
 
     // 10. Optional fields
     println!("\n10. Optional fields:");
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, AsunDecode)]
+    #[allow(dead_code)] // fields exist only for the {:?} demo below
     struct Item {
         id: i64,
         label: Option<String>,
@@ -143,7 +145,8 @@ fn main() {
 
     // 11. Array fields
     println!("\n11. Array fields:");
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, AsunDecode)]
+    #[allow(dead_code)] // fields exist only for the {:?} demo below
     struct Tagged {
         name: String,
         tags: Vec<String>,

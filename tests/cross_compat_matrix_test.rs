@@ -1,86 +1,86 @@
+use asun::AsunDecode;
 use asun::decode;
-use serde::Deserialize;
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixPerson {
     id: i64,
     name: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixPersonWithActive {
     id: i64,
     name: String,
     active: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixInnerThin {
     x: i64,
     y: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixOuterThin {
     name: String,
     inner: MatrixInnerThin,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixTaskThin {
     title: String,
     done: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixProjectThin {
     name: String,
     tasks: Vec<MatrixTaskThin>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixDstFewerOptionals {
     id: i64,
     label: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixL3Thin {
     a: i64,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixL2Thin {
     name: String,
     sub: MatrixL3Thin,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixL1Thin {
     id: i64,
     child: MatrixL2Thin,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixPersonScore {
     id: i64,
     score: f64,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Default)]
-#[serde(default)]
+#[derive(Debug, AsunDecode, PartialEq, Default)]
+#[asun(default)]
 struct MatrixNoOverlap {
     foo: i64,
     bar: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixNestedOptionalThin {
     name: String,
     nick: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, AsunDecode, PartialEq)]
 struct MatrixUserWithNestedOptional {
     id: i64,
     profile: MatrixNestedOptionalThin,

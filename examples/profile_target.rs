@@ -15,9 +15,9 @@
 // Each subcommand runs a single tight loop with no allocation outside the
 // hot path so perf samples are concentrated on encode/decode internals.
 
-use serde::{Deserialize, Serialize};
+use asun::{AsunDecode, AsunEncode};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct User {
     id: i64,
     name: String,
@@ -29,7 +29,7 @@ struct User {
     city: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct AllTypes {
     b: bool,
     i8v: i8,
@@ -49,35 +49,35 @@ struct AllTypes {
     vec_str: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct Task {
     id: i64,
     title: String,
     done: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct Project {
     id: i64,
     name: String,
     tasks: Vec<Task>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct Team {
     id: i64,
     name: String,
     projects: Vec<Project>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct Division {
     id: i64,
     name: String,
     teams: Vec<Team>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, AsunEncode, AsunDecode, PartialEq)]
 struct Company {
     id: i64,
     name: String,

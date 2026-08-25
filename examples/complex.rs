@@ -1,16 +1,16 @@
-use asun::{decode, decode_binary, encode, encode_binary, encode_typed};
+use asun::{AsunDecode, AsunEncode, decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
 
 // ===========================================================================
 // Basic types (existing)
 // ===========================================================================
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Department {
     title: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Employee {
     id: i64,
     name: String,
@@ -19,31 +19,31 @@ struct Employee {
     active: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct AttrEntry {
     key: String,
     value: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct StringEntry {
     key: String,
     value: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct WithEntries {
     name: String,
     attrs: Vec<AttrEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Nested {
     name: String,
     addr: Address,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Address {
     city: String,
     zip: i64,
@@ -53,7 +53,7 @@ struct Address {
 // All-types struct — every primitive and compound type ASUN supports
 // ===========================================================================
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct AllTypes {
     b: bool,
     i8v: i8,
@@ -79,7 +79,7 @@ struct AllTypes {
 // 5-level deep nesting: Country > Region > City > District > Street > Building
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Building {
     name: String,
     floors: i64,
@@ -87,21 +87,21 @@ struct Building {
     height_m: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Street {
     name: String,
     length_km: f64,
     buildings: Vec<Building>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct District {
     name: String,
     population: i64,
     streets: Vec<Street>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct City {
     name: String,
     population: i64,
@@ -109,13 +109,13 @@ struct City {
     districts: Vec<District>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Region {
     name: String,
     cities: Vec<City>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Country {
     name: String,
     code: String,
@@ -128,26 +128,26 @@ struct Country {
 // 7-level deep: Universe > Galaxy > SolarSystem > Planet > Continent > Nation > State
 // ===========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct State {
     name: String,
     capital: String,
     population: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Nation {
     name: String,
     states: Vec<State>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Continent {
     name: String,
     nations: Vec<Nation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Planet {
     name: String,
     radius_km: f64,
@@ -155,21 +155,21 @@ struct Planet {
     continents: Vec<Continent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct SolarSystem {
     name: String,
     star_type: String,
     planets: Vec<Planet>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Galaxy {
     name: String,
     star_count_billions: f64,
     systems: Vec<SolarSystem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Universe {
     name: String,
     age_billion_years: f64,
@@ -180,21 +180,21 @@ struct Universe {
 // Enum variants — all forms
 // ===========================================================================
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 enum Color {
     Red,
     Green,
     Blue,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 enum Shape {
     Circle(f64),
     Rectangle(f64, f64),
     Named { name: String, sides: i64 },
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct Drawing {
     title: String,
     color: Color,
@@ -206,7 +206,7 @@ struct Drawing {
 // Large config-like struct with entry lists and optional fields
 // ===========================================================================
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct DbConfig {
     host: String,
     port: i64,
@@ -215,21 +215,21 @@ struct DbConfig {
     timeout_ms: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct CacheConfig {
     enabled: bool,
     ttl_seconds: i64,
     max_size_mb: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct LogConfig {
     level: String,
     file: Option<String>,
     rotate: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
 struct ServiceConfig {
     name: String,
     version: String,
@@ -293,7 +293,7 @@ fn main() {
     // 5. Escaped strings (existing)
     // -----------------------------------------------------------------------
     println!("\n5. Escaped strings:");
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
     struct Note {
         text: String,
     }
@@ -310,7 +310,7 @@ fn main() {
     // 6. Float fields (existing)
     // -----------------------------------------------------------------------
     println!("\n6. Float fields:");
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
     struct Measurement {
         id: i64,
         value: f64,
@@ -331,7 +331,7 @@ fn main() {
     // 7. Negative numbers (existing)
     // -----------------------------------------------------------------------
     println!("\n7. Negative numbers:");
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
     struct Nums {
         a: i64,
         b: f64,
@@ -875,7 +875,7 @@ fn main() {
     println!("\n16. Edge cases:");
 
     // Empty vec
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
     struct WithVec {
         items: Vec<i64>,
     }
@@ -886,7 +886,7 @@ fn main() {
     assert_eq!(wv, wv2);
 
     // String with all special chars
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
     struct Special {
         val: String,
     }
@@ -920,7 +920,7 @@ fn main() {
     // 17. Array of arrays of arrays (3-level)
     // -----------------------------------------------------------------------
     println!("\n17. Triple-nested arrays:");
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
     struct Matrix3D {
         data: Vec<Vec<Vec<i64>>>,
     }

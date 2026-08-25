@@ -1,28 +1,28 @@
 #[cfg(test)]
 mod format_validation {
+    use asun::{AsunDecode, AsunEncode};
     use asun::{decode, encode_pretty, encode_pretty_typed};
-    use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct FmtUser {
         id: i64,
         name: String,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct Score {
         id: i64,
         value: f64,
         label: String,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct Inner {
         x: i64,
         label: String,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct Outer {
         id: i64,
         inner: Inner,
