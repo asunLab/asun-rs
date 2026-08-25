@@ -1,54 +1,25 @@
-//! ASUN Binary Format (ASUN-BIN)
+//! ASUN binary format (ASUN-BIN).
 //!
-//! A high-performance binary encoding for ASUN data structures.
-//! Provides `encode_binary` and `decode_binary` for zero-overhead struct ↔ bytes conversion.
-//!
-//! Integers are **LEB128 varint** encoded (with **zigzag** for signed types), which
-//! shrinks integer-heavy payloads substantially when values are small — the common
-//! case for IDs, counts, timestamps, and enum tags.
-//!
-//! ## Wire Format
-//!
-//! ```text
-//! bool      → 1 byte  (0x00=false, 0x01=true)
-//! i8        → 1 byte (signed; varint never helps for a single byte)
-//! u8        → 1 byte
-//! i16/i32/i64 → zigzag + LEB128 varint  (1..=10 bytes)
-//! u16/u32/u64 → LEB128 varint           (1..=10 bytes)
-//! f32       → 4 bytes LE (IEEE 754 bit-cast — float bits don't compress)
-//! f64       → 8 bytes LE (IEEE 754 bit-cast)
-//! char      → uvarint (Unicode scalar as u32)
-//! str       → uvarint length + UTF-8 bytes  ← ZERO-COPY on decode (&'de str)
-//! bytes     → uvarint length + raw bytes
-//! Option<T> → u8 tag (0=None, 1=Some) + [T payload if Some]
-//! Vec<T>    → uvarint count + [element × count]
-//! struct    → fields in declaration order (no length prefix — known from schema)
-//! tuple     → elements in order (no length prefix)
-//! enum      → uvarint variant_index + [payload for non-unit variants]
-//! unit      → 0 bytes
-//! newtype   → inner value directly (no wrapper)
-//! ```
-//!
-//! ## Key Features
-//!
-//! - **Compact integers**: LEB128 varint + zigzag; small values cost 1 byte.
-//! - **Zero-copy string decode**: borrowed `&'de str` slices directly reference input bytes.
-//! - **No type tags** for struct fields: schema drives layout (like Protobuf binary, not CBOR).
-//! - **SIMD-accelerated** bulk byte copy for large string payloads (≥ 32 bytes).
+//! Wire compatibility is preserved: unsigned integers use LEB128, signed
+//! integers use zigzag + LEB128, floats are fixed-width little-endian, and
+//! strings/bytes are length-prefixed. The implementation uses a pointer cursor
+//! for one bounds check per primitive and validates malformed integer encodings.
 
 use crate::error::{Error, Result};
 use crate::simd;
 use crate::traits::{AsunDecodeBinary, AsunEncodeBinary};
-use core::mem;
+use core::marker::PhantomData;
+use core::{mem, ptr, slice};
 
-// ============================================================================
-// zigzag helpers — map signed integers to unsigned so small magnitudes
-// (positive or negative) encode into few varint bytes.
-// ============================================================================
+/// Default guard for attacker-controlled sequence lengths.
+///
+/// Applications with a different protocol limit can construct a
+/// [`BinaryDecoder`] with [`BinaryDecoder::with_max_sequence_len`].
+pub const DEFAULT_MAX_SEQUENCE_LEN: usize = 16 * 1024 * 1024;
 
 #[inline(always)]
 fn zigzag_encode(v: i64) -> u64 {
-    ((v << 1) ^ (v >> 63)) as u64
+    ((v as u64) << 1) ^ ((v >> 63) as u64)
 }
 
 #[inline(always)]
@@ -56,17 +27,7 @@ fn zigzag_decode(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Encode `value` to a `Vec<u8>` using the ASUN binary format.
-///
-/// # Example
-/// ```rust,ignore
-/// let user = User { id: 1, name: "Alice".into(), active: true };
-/// let bytes = asun::encode_binary(&user)?;
-/// ```
+/// Encode `value` into a newly allocated byte vector.
 #[inline]
 pub fn encode_binary<T: AsunEncodeBinary + ?Sized>(value: &T) -> Result<Vec<u8>> {
     let mut enc = BinaryEncoder::with_capacity(256);
@@ -74,30 +35,40 @@ pub fn encode_binary<T: AsunEncodeBinary + ?Sized>(value: &T) -> Result<Vec<u8>>
     Ok(enc.buf)
 }
 
-/// Decode a value from ASUN binary bytes.
+/// Encode into a caller-owned vector while retaining its allocation.
 ///
-/// The lifetime `'de` allows **zero-copy** decoding: any `&'de str` fields
-/// in the target type will borrow directly from `data` with no allocation.
-///
-/// # Example
-/// ```rust,ignore
-/// let user: User = asun::decode_binary(&bytes)?;
-/// ```
+/// `out` is cleared before encoding. On error it contains the valid encoded
+/// prefix, and can still be reused by the next call.
+#[inline]
+pub fn encode_binary_into<T: AsunEncodeBinary + ?Sized>(
+    value: &T,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    out.clear();
+    let mut enc = BinaryEncoder::from_vec(mem::take(out));
+    let result = value.encode_binary(&mut enc);
+    *out = enc.buf;
+    result
+}
+
+/// Decode one value. Trailing bytes are accepted for compatibility and for
+/// callers that place several values in one framed buffer.
 #[inline]
 pub fn decode_binary<'de, T: AsunDecodeBinary<'de>>(data: &'de [u8]) -> Result<T> {
     let mut dec = BinaryDecoder::new(data);
     T::decode_binary(&mut dec)
 }
 
-// ============================================================================
-// BinaryEncoder
-// ============================================================================
+/// Decode exactly one value and reject trailing bytes.
+#[inline]
+pub fn decode_binary_exact<'de, T: AsunDecodeBinary<'de>>(data: &'de [u8]) -> Result<T> {
+    let mut dec = BinaryDecoder::new(data);
+    let value = T::decode_binary(&mut dec)?;
+    dec.finish()?;
+    Ok(value)
+}
 
-/// The ASUN binary encode sink that derive-generated [`AsunEncodeBinary`] impls
-/// write into. Prefer the [`encode_binary`] free function; this type is exposed
-/// for the generated code.
-///
-/// [`AsunEncodeBinary`]: crate::AsunEncodeBinary
+/// Binary encode sink used by derive-generated implementations.
 pub struct BinaryEncoder {
     pub(crate) buf: Vec<u8>,
 }
@@ -122,17 +93,41 @@ impl BinaryEncoder {
         }
     }
 
-    /// Consume the encoder, returning the accumulated bytes.
+    /// Reuse an existing vector allocation as an encoder sink.
+    #[inline]
+    pub fn from_vec(buf: Vec<u8>) -> Self {
+        Self { buf }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.buf.reserve(additional);
+    }
+
     #[inline]
     pub fn into_bytes(self) -> Vec<u8> {
         self.buf
     }
 
-    // ------------------------------------------------------------------
-    // Primitive writers — each emits fixed bytes, zero heap allocation.
-    //
-    // These are the direct sink methods the `AsunEncodeBinary` impls call.
-    // ------------------------------------------------------------------
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
 
     #[inline(always)]
     pub fn write_bool(&mut self, v: bool) -> Result<()> {
@@ -146,17 +141,30 @@ impl BinaryEncoder {
         Ok(())
     }
 
-    /// LEB128 unsigned varint.
+    /// Write unsigned LEB128 directly into spare vector capacity. The common
+    /// one-byte value retains the tiny `Vec::push` fast path.
     #[inline(always)]
     fn write_uvarint(&mut self, mut v: u64) {
-        while v >= 0x80 {
-            self.buf.push((v as u8) | 0x80);
-            v >>= 7;
+        if v < 0x80 {
+            self.buf.push(v as u8);
+            return;
         }
-        self.buf.push(v as u8);
+
+        self.buf.reserve(10);
+        let start = self.buf.len();
+        unsafe {
+            let out = self.buf.as_mut_ptr().add(start);
+            let mut n = 0usize;
+            while v >= 0x80 {
+                out.add(n).write((v as u8) | 0x80);
+                n += 1;
+                v >>= 7;
+            }
+            out.add(n).write(v as u8);
+            self.buf.set_len(start + n + 1);
+        }
     }
 
-    /// zigzag + LEB128 signed varint.
     #[inline(always)]
     fn write_ivarint(&mut self, v: i64) {
         self.write_uvarint(zigzag_encode(v));
@@ -206,40 +214,34 @@ impl BinaryEncoder {
 
     #[inline(always)]
     pub fn write_f32(&mut self, v: f32) -> Result<()> {
-        // Bit-cast: no conversion, just copy 4 IEEE-754 bytes
         self.buf.extend_from_slice(&v.to_bits().to_le_bytes());
         Ok(())
     }
 
     #[inline(always)]
     pub fn write_f64(&mut self, v: f64) -> Result<()> {
-        // Bit-cast: no conversion, just copy 8 IEEE-754 bytes
         self.buf.extend_from_slice(&v.to_bits().to_le_bytes());
         Ok(())
     }
 
     #[inline(always)]
     pub fn write_char(&mut self, v: char) -> Result<()> {
-        self.write_uvarint(v as u64);
+        self.write_uvarint(v as u32 as u64);
         Ok(())
     }
 
-    /// Write raw bytes with SIMD bulk copy for large payloads.
     #[inline]
     fn write_bytes_raw(&mut self, data: &[u8]) {
         simd::simd_bulk_extend(&mut self.buf, data);
     }
 
-    /// Write a string: `uvarint length` + UTF-8 bytes.
     #[inline]
     pub fn write_str(&mut self, s: &str) -> Result<()> {
-        let bytes = s.as_bytes();
-        self.write_uvarint(bytes.len() as u64);
-        self.write_bytes_raw(bytes);
+        self.write_uvarint(s.len() as u64);
+        self.write_bytes_raw(s.as_bytes());
         Ok(())
     }
 
-    /// Write raw bytes: `uvarint length` + bytes.
     #[inline]
     pub fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
         self.write_uvarint(data.len() as u64);
@@ -247,10 +249,6 @@ impl BinaryEncoder {
         Ok(())
     }
 
-    /// Write a sequence: `uvarint count` + each element in order.
-    ///
-    /// The length is always known here (a slice), so the count is written up
-    /// front and elements stream directly into the buffer — no scratch buffer.
     #[inline]
     pub fn write_seq<T: AsunEncodeBinary>(&mut self, items: &[T]) -> Result<()> {
         self.write_uvarint(items.len() as u64);
@@ -260,7 +258,6 @@ impl BinaryEncoder {
         Ok(())
     }
 
-    /// Write an enum variant index as a uvarint.
     #[inline]
     pub fn write_variant_index(&mut self, index: u32) -> Result<()> {
         self.write_uvarint(index as u64);
@@ -268,79 +265,149 @@ impl BinaryEncoder {
     }
 }
 
-// ============================================================================
-// BinaryDecoder
-// ============================================================================
-
-/// The ASUN binary decode source that derive-generated [`AsunDecodeBinary`]
-/// impls pull from. Prefer the [`decode_binary`] free function; this type is
-/// exposed for the generated code. The `'de` lifetime enables zero-copy
-/// `&'de str` / `&'de [u8]` fields borrowed from the input.
+/// Binary decode source used by derive-generated implementations.
 ///
-/// [`AsunDecodeBinary`]: crate::AsunDecodeBinary
+/// The decoder stores a pointer plus remaining length rather than `&[u8] +
+/// index`. All pointer movement is centralized in checked methods, while
+/// returned zero-copy slices remain tied to the original `'de` input lifetime.
 pub struct BinaryDecoder<'de> {
-    data: &'de [u8],
-    pos: usize,
+    ptr: *const u8,
+    remaining: usize,
+    max_sequence_len: usize,
+    _marker: PhantomData<&'de [u8]>,
 }
+
+// SAFETY: the raw pointer represents an immutable `&'de [u8]`; cursor mutation
+// requires `&mut self`, and shared methods never dereference mutable memory.
+unsafe impl<'de> Send for BinaryDecoder<'de> {}
+unsafe impl<'de> Sync for BinaryDecoder<'de> {}
 
 impl<'de> BinaryDecoder<'de> {
     #[inline]
     pub fn new(data: &'de [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self::with_max_sequence_len(data, DEFAULT_MAX_SEQUENCE_LEN)
     }
 
-    // ------------------------------------------------------------------
-    // Primitive readers — all inline, zero allocation
-    // ------------------------------------------------------------------
+    #[inline]
+    pub fn with_max_sequence_len(data: &'de [u8], max_sequence_len: usize) -> Self {
+        Self {
+            ptr: data.as_ptr(),
+            remaining: data.len(),
+            max_sequence_len,
+            _marker: PhantomData,
+        }
+    }
 
     #[inline(always)]
-    fn ensure(&self, n: usize) -> Result<()> {
-        // `self.pos + n` can overflow `usize` for an attacker-controlled varint
-        // length, wrapping to a small value that wrongly passes the check and
-        // then panics on the subsequent slice. Compare against remaining bytes
-        // instead so the arithmetic can never overflow.
-        if n <= self.data.len() - self.pos {
+    pub fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    #[inline(always)]
+    pub fn is_finished(&self) -> bool {
+        self.remaining == 0
+    }
+
+    #[inline]
+    pub fn finish(&self) -> Result<()> {
+        if self.is_finished() {
             Ok(())
         } else {
-            Err(Error::Eof)
+            Err(Error::TrailingBytes)
         }
+    }
+
+    #[inline(always)]
+    fn take(&mut self, n: usize) -> Result<&'de [u8]> {
+        if n > self.remaining {
+            return Err(Error::Eof);
+        }
+        let start = self.ptr;
+        self.ptr = unsafe { start.add(n) };
+        self.remaining -= n;
+        // SAFETY: `n` was checked against the remaining input length, and the
+        // backing allocation is alive for `'de`.
+        Ok(unsafe { slice::from_raw_parts(start, n) })
     }
 
     #[inline(always)]
     pub fn read_u8(&mut self) -> Result<u8> {
-        self.ensure(1)?;
-        let v = self.data[self.pos];
-        self.pos += 1;
-        Ok(v)
+        if self.remaining == 0 {
+            return Err(Error::Eof);
+        }
+        let value = unsafe { *self.ptr };
+        self.ptr = unsafe { self.ptr.add(1) };
+        self.remaining -= 1;
+        Ok(value)
     }
 
-    /// LEB128 unsigned varint. Rejects overlong (> 64-bit) encodings.
+    /// Strict unsigned LEB128 decoder. The tenth byte of a `u64` may contain
+    /// only one payload bit, so values greater than `1` are rejected.
     #[inline(always)]
     fn read_uvarint(&mut self) -> Result<u64> {
-        let mut result: u64 = 0;
-        let mut shift = 0u32;
-        loop {
-            let byte = self.read_u8()?;
-            if shift >= 64 {
-                return Err(Error::msg("varint overflow"));
+        let remaining = self.remaining();
+        if remaining == 0 {
+            return Err(Error::Eof);
+        }
+
+        let start = self.ptr;
+        unsafe {
+            let first = *start;
+            if first < 0x80 {
+                self.ptr = start.add(1);
+                self.remaining -= 1;
+                return Ok(first as u64);
             }
-            result |= ((byte & 0x7f) as u64) << shift;
-            if byte & 0x80 == 0 {
-                return Ok(result);
+
+            let mut value = (first & 0x7f) as u64;
+            let available = remaining.min(10);
+            let mut i = 1usize;
+            while i < available {
+                let byte = *start.add(i);
+                if i == 9 {
+                    if byte > 1 {
+                        return Err(Error::VarintOverflow);
+                    }
+                    value |= (byte as u64) << 63;
+                    self.ptr = start.add(10);
+                    self.remaining -= 10;
+                    return Ok(value);
+                }
+
+                value |= ((byte & 0x7f) as u64) << (i * 7);
+                if byte < 0x80 {
+                    self.ptr = start.add(i + 1);
+                    self.remaining -= i + 1;
+                    return Ok(value);
+                }
+                i += 1;
             }
-            shift += 7;
+        }
+
+        if remaining < 10 {
+            Err(Error::Eof)
+        } else {
+            Err(Error::VarintOverflow)
         }
     }
 
-    /// zigzag + LEB128 signed varint.
     #[inline(always)]
     fn read_ivarint(&mut self) -> Result<i64> {
         Ok(zigzag_decode(self.read_uvarint()?))
     }
 
     #[inline(always)]
+    fn read_len(&mut self) -> Result<usize> {
+        usize::try_from(self.read_uvarint()?).map_err(|_| Error::IntegerOutOfRange)
+    }
+
+    #[inline(always)]
     pub fn read_bool(&mut self) -> Result<bool> {
-        Ok(self.read_u8()? != 0)
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::InvalidBool),
+        }
     }
 
     #[inline(always)]
@@ -350,12 +417,12 @@ impl<'de> BinaryDecoder<'de> {
 
     #[inline(always)]
     pub fn read_i16(&mut self) -> Result<i16> {
-        Ok(self.read_ivarint()? as i16)
+        i16::try_from(self.read_ivarint()?).map_err(|_| Error::IntegerOutOfRange)
     }
 
     #[inline(always)]
     pub fn read_i32(&mut self) -> Result<i32> {
-        Ok(self.read_ivarint()? as i32)
+        i32::try_from(self.read_ivarint()?).map_err(|_| Error::IntegerOutOfRange)
     }
 
     #[inline(always)]
@@ -365,12 +432,12 @@ impl<'de> BinaryDecoder<'de> {
 
     #[inline(always)]
     pub fn read_u16(&mut self) -> Result<u16> {
-        Ok(self.read_uvarint()? as u16)
+        u16::try_from(self.read_uvarint()?).map_err(|_| Error::IntegerOutOfRange)
     }
 
     #[inline(always)]
     pub fn read_u32(&mut self) -> Result<u32> {
-        Ok(self.read_uvarint()? as u32)
+        u32::try_from(self.read_uvarint()?).map_err(|_| Error::IntegerOutOfRange)
     }
 
     #[inline(always)]
@@ -380,98 +447,86 @@ impl<'de> BinaryDecoder<'de> {
 
     #[inline(always)]
     fn read_u32_le(&mut self) -> Result<u32> {
-        self.ensure(4)?;
-        let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-        self.pos += 4;
-        Ok(v)
+        let bytes = self.take(4)?;
+        let raw = unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<u32>()) };
+        Ok(u32::from_le(raw))
     }
 
     #[inline(always)]
     fn read_u64_le(&mut self) -> Result<u64> {
-        self.ensure(8)?;
-        let v = u64::from_le_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-        self.pos += 8;
-        Ok(v)
+        let bytes = self.take(8)?;
+        let raw = unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<u64>()) };
+        Ok(u64::from_le(raw))
     }
 
     #[inline(always)]
     pub fn read_f32(&mut self) -> Result<f32> {
-        // Bit-cast: read 4 fixed LE bytes, interpret as IEEE-754 float32
         Ok(f32::from_bits(self.read_u32_le()?))
     }
 
     #[inline(always)]
     pub fn read_f64(&mut self) -> Result<f64> {
-        // Bit-cast: read 8 fixed LE bytes, interpret as IEEE-754 float64
         Ok(f64::from_bits(self.read_u64_le()?))
     }
 
     #[inline(always)]
     pub fn read_char(&mut self) -> Result<char> {
-        let cp = self.read_uvarint()? as u32;
-        char::from_u32(cp).ok_or_else(|| Error::msg(format!("invalid char codepoint: {cp}")))
+        let cp = u32::try_from(self.read_uvarint()?).map_err(|_| Error::IntegerOutOfRange)?;
+        char::from_u32(cp).ok_or(Error::InvalidUnicodeEscape)
     }
 
-    /// Read string **without allocation** — returns a `&'de str` borrowing `data`.
-    ///
-    /// This is the core zero-copy path: callers with `&'de str` fields pay
-    /// only for the `u32` length read + a bounds check.
+    /// Read a valid UTF-8 string without allocating.
     #[inline]
     pub fn read_str_zerocopy(&mut self) -> Result<&'de str> {
-        let len = self.read_uvarint()? as usize;
-        self.ensure(len)?;
-        let bytes = &self.data[self.pos..self.pos + len];
-        self.pos += len;
-        // The input may be untrusted binary, so validate rather than assume
-        // well-formed UTF-8; an invalid slice would otherwise be UB.
-        core::str::from_utf8(bytes).map_err(|_| Error::msg("invalid utf-8"))
+        let bytes = self.read_bytes_zerocopy()?;
+        core::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)
     }
 
-    /// Read an owned `String` — borrows the input then copies into a fresh alloc.
     #[inline]
     pub fn read_string(&mut self) -> Result<String> {
         Ok(self.read_str_zerocopy()?.to_owned())
     }
 
-    /// Read raw bytes slice — zero-copy borrow of input.
+    /// Read raw bytes without allocating.
     #[inline]
     pub fn read_bytes_zerocopy(&mut self) -> Result<&'de [u8]> {
-        let len = self.read_uvarint()? as usize;
-        self.ensure(len)?;
-        let bytes = &self.data[self.pos..self.pos + len];
-        self.pos += len;
-        Ok(bytes)
+        let len = self.read_len()?;
+        self.take(len)
     }
 
-    /// Read a sequence: `uvarint count` + each element in order.
     #[inline]
     pub fn read_vec<T: AsunDecodeBinary<'de>>(&mut self) -> Result<Vec<T>> {
-        let count = self.read_uvarint()? as usize;
-        // `count` is attacker-controlled; guard the pre-allocation against a
-        // bogus huge length by capping the reserve to what the input could
-        // possibly contain (each element is ≥ 1 byte on the wire).
-        let cap = count.min(self.data.len().saturating_sub(self.pos));
-        let mut out = Vec::with_capacity(cap);
+        let count = self.read_len()?;
+        if count > self.max_sequence_len {
+            return Err(Error::SequenceTooLong);
+        }
+
+        let mut out = Vec::new();
+        // Do not preallocate solely from an untrusted count. Ordinary wire
+        // elements consume at least one byte, so `remaining` is a useful upper
+        // bound for the common case. ZSTs allocate nothing.
+        let initial = if mem::size_of::<T>() == 0 {
+            0
+        } else {
+            count.min(self.remaining())
+        };
+        out.try_reserve_exact(initial)
+            .map_err(|_| Error::AllocationFailed)?;
         for _ in 0..count {
             out.push(T::decode_binary(self)?);
         }
         Ok(out)
     }
 
-    /// Read an enum variant index (uvarint) as a `u32`.
     #[inline]
     pub fn read_variant_index(&mut self) -> Result<u32> {
-        Ok(self.read_uvarint()? as u32)
+        u32::try_from(self.read_uvarint()?).map_err(|_| Error::IntegerOutOfRange)
     }
 }
 
-// ============================================================================
-// Compile-time size check
-// ============================================================================
-
 const _: () = {
-    // BinaryDecoder: &[u8] (2 usize fat ptr) + usize pos = 3 usize
-    assert!(mem::size_of::<BinaryDecoder<'_>>() == 3 * mem::size_of::<usize>());
+    // Pointer + remaining length + one sequence limit. PhantomData is zero-sized.
+    assert!(mem::size_of::<BinaryDecoder<'static>>() == 3 * mem::size_of::<usize>());
 };
 
 #[cfg(test)]
@@ -642,4 +697,35 @@ mod tests {
             assert_eq!(c, c2);
         }
     }
+
+    #[test]
+    fn rejects_invalid_binary_scalars() {
+        let overflow = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02];
+        let mut dec = BinaryDecoder::new(&overflow);
+        assert!(matches!(dec.read_u64(), Err(Error::VarintOverflow)));
+
+        let mut dec = BinaryDecoder::new(&[0x80, 0x80, 0x04]); // 65536
+        assert!(matches!(dec.read_u16(), Err(Error::IntegerOutOfRange)));
+
+        let mut dec = BinaryDecoder::new(&[2]);
+        assert!(matches!(dec.read_bool(), Err(Error::InvalidBool)));
+    }
+
+    #[test]
+    fn exact_decode_rejects_trailing_bytes() {
+        assert!(matches!(
+            decode_binary_exact::<u8>(&[1, 2]),
+            Err(Error::TrailingBytes)
+        ));
+    }
+
+    #[test]
+    fn encode_into_reuses_capacity() {
+        let mut out = Vec::with_capacity(1024);
+        let cap = out.capacity();
+        encode_binary_into(&123u64, &mut out).unwrap();
+        assert_eq!(out.capacity(), cap);
+        assert_eq!(decode_binary_exact::<u64>(&out).unwrap(), 123);
+    }
+
 }

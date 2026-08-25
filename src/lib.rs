@@ -130,7 +130,9 @@ pub mod simd;
 
 pub mod traits;
 
-pub use binary::{decode_binary, encode_binary};
+pub use binary::{
+    decode_binary, decode_binary_exact, encode_binary, encode_binary_into, DEFAULT_MAX_SEQUENCE_LEN,
+};
 pub use decode::decode;
 pub use encode::{encode, encode_typed};
 pub use error::{Error, Result};
