@@ -131,7 +131,7 @@ pub mod simd;
 pub mod traits;
 
 pub use binary::{
-    decode_binary, decode_binary_exact, encode_binary, encode_binary_into, DEFAULT_MAX_SEQUENCE_LEN,
+    DEFAULT_MAX_SEQUENCE_LEN, decode_binary, decode_binary_exact, encode_binary, encode_binary_into,
 };
 pub use decode::decode;
 pub use encode::{encode, encode_typed};
@@ -307,11 +307,11 @@ mod tests {
         };
 
         let untyped = encode(&note).unwrap();
-        assert_eq!(untyped, r#"{text}:("@Alice")"#);
+        assert_eq!(untyped, r#"{text}:(@Alice)"#);
         assert_eq!(decode::<Note>(&untyped).unwrap(), note);
 
         let typed = encode_typed(&note).unwrap();
-        assert_eq!(typed, r#"{text@str}:("@Alice")"#);
+        assert_eq!(typed, r#"{text@str}:(@Alice)"#);
         assert_eq!(decode::<Note>(&typed).unwrap(), note);
 
         let pretty = encode_pretty(&note).unwrap();
@@ -353,9 +353,12 @@ mod tests {
 
     #[test]
     fn test_trailing_comma() {
+        // Rows are never null, so a trailing comma after the last row is an
+        // error (SPEC S9), while one inside a tuple is a null slot.
         let input = "[{id@int,name@str,active@bool}]:(1,Alice,true),(2,Bob,false),";
-        let users: Vec<User> = decode(input).unwrap();
-        assert_eq!(users.len(), 2);
+        assert!(decode::<Vec<User>>(input).is_err());
+        let v: Vec<Option<i64>> = decode("[1,2,]").unwrap();
+        assert_eq!(v, vec![Some(1), Some(2), None]);
     }
 
     #[test]
@@ -964,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_decode_field_names_with_plus_minus() {
-        let input = "{lowPriorityEIR+CIR@int,a-b@str,name@str}:(42,hello,Alice)";
+        let input = r#"{"lowPriorityEIR+CIR"@int,"a-b"@str,name@str}:(42,hello,Alice)"#;
         let v: PlusMinusFields = decode(input).unwrap();
         assert_eq!(v.low_priority, 42);
         assert_eq!(v.a_b, "hello");
@@ -973,10 +976,14 @@ mod tests {
 
     #[test]
     fn test_decode_field_names_plus_minus_untyped() {
-        let input = "{lowPriorityEIR+CIR,a-b,name}:(42,hello,Alice)";
+        let input = r#"{"lowPriorityEIR+CIR","a-b",name}:(42,hello,Alice)"#;
         let v: PlusMinusFields = decode(input).unwrap();
         assert_eq!(v.low_priority, 42);
         assert_eq!(v.a_b, "hello");
+        // `+` / `-` are outside bare-name; such names must be quoted.
+        assert!(
+            decode::<PlusMinusFields>("{lowPriorityEIR+CIR,a-b,name}:(42,hello,Alice)").is_err()
+        );
     }
 
     #[test]

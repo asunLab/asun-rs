@@ -249,7 +249,7 @@ fn out_of_range_integers_are_rejected() {
     ));
     assert!(matches!(
         decode::<Narrow>("{i,u,w}:(0,-1,0)"),
-        Err(Error::InvalidNumber)
+        Err(Error::IntegerOutOfRange)
     ));
 }
 

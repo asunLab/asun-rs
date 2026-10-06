@@ -51,10 +51,31 @@ pub enum Error {
     UnclosedComment,
     UnclosedParen,
     UnclosedBracket,
-    FieldCountMismatch { expected: u32, got: u32 },
+    FieldCountMismatch {
+        expected: u32,
+        got: u32,
+    },
     InvalidUnicodeEscape,
     /// Input nesting exceeded [`crate::decode::MAX_DEPTH`].
     DepthLimitExceeded,
+    /// The document holds no value (only whitespace / comments).
+    EmptyDocument,
+    /// A bare `(...)` tuple at the top level; tuples need a schema.
+    BareTuple,
+    /// A byte that cannot start or continue the expected token.
+    UnexpectedChar(char),
+    /// A null slot (empty or `null`) decoded into a non-`Option` target.
+    NullNotAllowed,
+    /// A scalar hint (`@int` …) the value or the target type contradicts.
+    HintMismatch,
+    /// The same field name appears twice in one schema.
+    DuplicateField,
+    /// A bare field name outside `[A-Za-z0-9_]+`, or an empty one.
+    InvalidFieldName,
+    /// A raw control character (U+0000–U+001F) inside a quoted string.
+    ControlCharInString,
+    /// A float literal whose magnitude overflows the target type.
+    FloatOverflow,
 }
 
 impl Error {
@@ -105,6 +126,15 @@ impl fmt::Display for Error {
             }
             Error::InvalidUnicodeEscape => write!(f, "invalid unicode escape"),
             Error::DepthLimitExceeded => write!(f, "input nesting exceeds the depth limit"),
+            Error::EmptyDocument => write!(f, "empty document"),
+            Error::BareTuple => write!(f, "a top-level tuple needs a schema"),
+            Error::UnexpectedChar(c) => write!(f, "unexpected character {:?}", c),
+            Error::NullNotAllowed => write!(f, "null value for a non-optional target"),
+            Error::HintMismatch => write!(f, "value does not match its schema type hint"),
+            Error::DuplicateField => write!(f, "duplicate field name in schema"),
+            Error::InvalidFieldName => write!(f, "invalid bare field name"),
+            Error::ControlCharInString => write!(f, "raw control character in quoted string"),
+            Error::FloatOverflow => write!(f, "float literal out of range"),
         }
     }
 }

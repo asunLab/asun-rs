@@ -155,36 +155,59 @@ fn prepend(buf: &mut Vec<u8>, header: &[u8]) {
 /// `None` means the string can go on the wire bare. `Some(i)` means it must be
 /// quoted and `s[..i]` is already known to be escape-free, so the writer does
 /// not have to re-scan it.
+///
+/// A plain string (GRAMMAR.abnf `plain-string`) may contain anything except
+/// `, ( ) [ ] { } " \`, control characters and the sequence `/*`; it must not
+/// start or end with whitespace, and it must not read back as another type
+/// (`true`, `false`, `null`, a number). Interior spaces, `@`, `:`, `/` and `*`
+/// stay bare, which is where most of the token savings over quoting come from.
 #[inline]
 fn quote_scan(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
-    if bytes.is_empty() {
+    let len = bytes.len();
+    if len == 0 {
         return Some(0);
     }
 
-    // One pass covers control chars, space (so leading/trailing whitespace is
-    // caught per SPEC §S2), and every structural / comment-introducing byte.
-    let special = simd::simd_find_special(bytes);
-    if special < bytes.len() {
+    // Short strings (names, tags, enum variants) dominate; scan them with the
+    // table directly instead of going through the SIMD entry point.
+    let mut special = if len < 16 {
+        bytes
+            .iter()
+            .position(|&b| simd::NEEDS_QUOTE[b as usize])
+            .unwrap_or(len)
+    } else {
+        simd::simd_find_special(bytes, 0)
+    };
+    // `/` only matters as the start of `/*`.
+    while special < len && bytes[special] == b'/' {
+        if special + 1 < len && bytes[special + 1] == b'*' {
+            return Some(special);
+        }
+        special = simd::simd_find_special(bytes, special + 1);
+    }
+    if special < len {
         return Some(special);
     }
-
-    // Bool / null lookalikes.
-    if matches!(
-        bytes,
-        b"true" | b"false" | b"True" | b"False" | b"TRUE" | b"FALSE"
-    ) {
-        return Some(bytes.len());
+    // Trailing whitespace would be trimmed (tabs are control bytes, caught
+    // above).
+    if bytes[len - 1] == b' ' {
+        return Some(len);
     }
-
-    // Number-pattern check: only relevant when the first byte could plausibly
-    // begin a number literal. For strings starting with a letter or any other
-    // non-numeric byte, the whole-string pattern match cannot succeed, so we
-    // skip the inner loop entirely. This is the common case for ASCII names,
-    // emails (already caught by '@' above), tags, etc.
+    // Everything else depends on the first byte; one dispatch keeps the common
+    // case (a letter other than t/f/n) to a single branch.
     let first = bytes[0];
-    if !matches!(first, b'-' | b'+' | b'0'..=b'9' | b'.') {
-        return None;
+    match first {
+        b'-' | b'+' | b'0'..=b'9' | b'.' => {}
+        // Leading whitespace would be trimmed.
+        b' ' => return Some(len),
+        // Keyword lookalikes (keywords are case-sensitive).
+        b't' | b'f' | b'n' => {
+            return matches!(bytes, b"true" | b"false" | b"null").then_some(len);
+        }
+        // A leading U+FEFF at the start of a document would be skipped as a BOM.
+        0xEF => return bytes.starts_with("\u{FEFF}".as_bytes()).then_some(len),
+        _ => return None,
     }
 
     // Number-pattern check: anything decoder might re-read as a number.
@@ -197,7 +220,7 @@ fn quote_scan(s: &str) -> Option<usize> {
     let mut saw_dot = false;
     let mut saw_exp = false;
     let mut number_like = true;
-    while i < bytes.len() {
+    while i < len {
         let b = bytes[i];
         if b.is_ascii_digit() {
             saw_digit = true;
@@ -205,7 +228,7 @@ fn quote_scan(s: &str) -> Option<usize> {
             saw_dot = true;
         } else if (b == b'e' || b == b'E') && saw_digit && !saw_exp {
             saw_exp = true;
-            if i + 1 < bytes.len() && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-') {
+            if i + 1 < len && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-') {
                 i += 1;
             }
             saw_digit = false;
@@ -216,9 +239,19 @@ fn quote_scan(s: &str) -> Option<usize> {
         i += 1;
     }
     if number_like && saw_digit {
-        return Some(bytes.len());
+        return Some(len);
     }
     None
+}
+
+/// Write `s` as an ASUN string value: bare when the grammar allows it, quoted
+/// and escaped otherwise.
+#[inline(always)]
+fn write_str_value(buf: &mut Vec<u8>, s: &str) {
+    match quote_scan(s) {
+        Some(first_escape) => simd::simd_write_escaped_from(buf, s.as_bytes(), first_escape),
+        None => buf.extend_from_slice(s.as_bytes()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +283,14 @@ pub struct Encoder {
     /// The schema captured from the first row is reused for every subsequent
     /// row in the same sequence.
     skip_schema_capture: bool,
+    /// Set by the top-level `SeqEncoder` while it encodes a direct element, so
+    /// only a struct that *is* a row (not one nested deeper, as in
+    /// `Vec<Vec<T>>`) captures the shared `[{schema}]:` header.
+    top_seq_direct: bool,
+    /// Start offsets of the open `[`-tuples (Rust tuples, tuple structs) and
+    /// how many elements each has written, so a lone null element can be
+    /// spelled `[null]` instead of the empty array `[]`.
+    tuple_frames: Vec<(usize, u32)>,
 }
 
 /// Serialize a value to an ASUN text string with a plain schema.
@@ -259,7 +300,7 @@ pub struct Encoder {
 pub fn encode<T: AsunEncode + ?Sized>(value: &T) -> Result<String> {
     let mut encoder = Encoder::new(false);
     value.encode(&mut encoder)?;
-    Ok(unsafe { String::from_utf8_unchecked(encoder.buf) })
+    Ok(encoder.finish())
 }
 
 /// Serialize a single struct to ASUN string with type-annotated schema.
@@ -268,7 +309,7 @@ pub fn encode<T: AsunEncode + ?Sized>(value: &T) -> Result<String> {
 pub fn encode_typed<T: AsunEncode + ?Sized>(value: &T) -> Result<String> {
     let mut encoder = Encoder::new(true);
     value.encode(&mut encoder)?;
-    Ok(unsafe { String::from_utf8_unchecked(encoder.buf) })
+    Ok(encoder.finish())
 }
 
 /// Per GRAMMAR.abnf `bare-field-name = 1*( ALPHA / DIGIT / "_" )`. Anything
@@ -310,8 +351,8 @@ fn schema_field_name_needs_quotes(name: &str) -> bool {
         return true;
     }
 
-    // Reserved keywords (would be re-parsed as booleans).
-    matches!(bytes, b"true" | b"false")
+    // Reserved keywords, quoted for decoders that treat them specially.
+    matches!(bytes, b"true" | b"false" | b"null")
 }
 
 fn push_schema_field_name(buf: &mut Vec<u8>, name: &str) {
@@ -319,20 +360,8 @@ fn push_schema_field_name(buf: &mut Vec<u8>, name: &str) {
         buf.extend_from_slice(name.as_bytes());
         return;
     }
-    buf.push(b'"');
-    for &b in name.as_bytes() {
-        match b {
-            b'"' => buf.extend_from_slice(br#"\""#),
-            b'\\' => buf.extend_from_slice(br#"\\"#),
-            b'\n' => buf.extend_from_slice(br#"\n"#),
-            b'\r' => buf.extend_from_slice(br#"\r"#),
-            b'\t' => buf.extend_from_slice(br#"\t"#),
-            0x08 => buf.extend_from_slice(br#"\b"#),
-            0x0c => buf.extend_from_slice(br#"\f"#),
-            _ => buf.push(b),
-        }
-    }
-    buf.push(b'"');
+    // Same escaping as string values, so control characters become `\u00XX`.
+    simd::simd_write_escaped(buf, name.as_bytes());
 }
 
 impl Encoder {
@@ -351,7 +380,18 @@ impl Encoder {
             top_seq_field_schemas: None,
             nested_schema: None,
             skip_schema_capture: false,
+            top_seq_direct: false,
+            tuple_frames: Vec::new(),
         }
+    }
+
+    /// Take the finished document. A top-level null writes nothing into its
+    /// (absent) slot, and an empty document is invalid, so spell it `null`.
+    pub(crate) fn finish(mut self) -> String {
+        if self.buf.is_empty() {
+            self.buf.extend_from_slice(b"null");
+        }
+        unsafe { String::from_utf8_unchecked(self.buf) }
     }
 
     #[inline(always)]
@@ -465,8 +505,7 @@ impl Encoder {
             self.current_type_hint = Some("str");
         }
         let mut tmp = [0u8; 4];
-        let s = v.encode_utf8(&mut tmp);
-        self.buf.extend_from_slice(s.as_bytes());
+        write_str_value(&mut self.buf, v.encode_utf8(&mut tmp));
         Ok(())
     }
 
@@ -476,12 +515,7 @@ impl Encoder {
         if self.typed && self.current_type_hint.is_none() {
             self.current_type_hint = Some("str");
         }
-        match quote_scan(v) {
-            Some(first_escape) => {
-                simd::simd_write_escaped_from(&mut self.buf, v.as_bytes(), first_escape)
-            }
-            None => self.buf.extend_from_slice(v.as_bytes()),
-        }
+        write_str_value(&mut self.buf, v);
         Ok(())
     }
 
@@ -512,17 +546,32 @@ impl Encoder {
         value.encode(self)
     }
 
+    /// Encode `()` / a unit struct. Like JSON, unit carries no data: it is a
+    /// null (an empty slot, or `null` at the top level).
     #[inline]
     pub fn encode_unit(&mut self) -> Result<()> {
         self.push_separator();
-        self.buf.extend_from_slice(b"()");
         Ok(())
     }
 
     /// Encode a unit enum variant (text: bare variant name).
     #[inline]
     pub fn encode_unit_variant(&mut self, variant: &str) -> Result<()> {
-        self.encode_str(variant)
+        // The name is written like a string, but an enum is not `@str`: other
+        // variants of the same type are `[...]` arrays.
+        let hint = self.current_type_hint;
+        self.encode_str(variant)?;
+        self.current_type_hint = hint;
+        Ok(())
+    }
+
+    /// Forget the hint / schema fragment that the contents of a tuple or enum
+    /// payload left behind: a heterogeneous value must not hand its first
+    /// element's type to the enclosing field's binding.
+    #[inline]
+    fn clear_value_hint(&mut self) {
+        self.current_type_hint = None;
+        self.nested_schema = None;
     }
 
     /// Encode a newtype enum variant `(variant,value)`.
@@ -532,12 +581,16 @@ impl Encoder {
         value: &T,
     ) -> Result<()> {
         self.push_separator();
-        self.buf.push(b'(');
-        self.buf.extend_from_slice(variant.as_bytes());
+        self.buf.push(b'[');
+        write_str_value(&mut self.buf, variant);
         self.buf.push(b',');
         self.first = true;
+        self.in_tuple = true;
+        self.top_seq_direct = false;
         value.encode(&mut *self)?;
-        self.buf.push(b')');
+        self.buf.push(b']');
+        self.first = false;
+        self.clear_value_hint();
         Ok(())
     }
 
@@ -572,11 +625,14 @@ impl Encoder {
                 is_top_seq: true,
                 cached_nested_schema: None,
                 skip_was_set: false,
+                data_start: self.buf.len(),
+                has_null: false,
             })
         } else {
             if let Some(len) = len {
                 self.reserve_for_seq(len, false);
             }
+            self.top_seq_direct = false;
             self.push_separator();
             self.buf.push(b'[');
             Ok(SeqEncoder {
@@ -584,51 +640,76 @@ impl Encoder {
                 is_top_seq: false,
                 cached_nested_schema: None,
                 skip_was_set: false,
+                data_start: self.buf.len(),
+                has_null: false,
             })
         }
     }
 
-    /// Begin a tuple `(`. Used by tuple / tuple-struct built-in impls.
+    /// Begin a positional tuple. Rust tuples and tuple structs have no field
+    /// names, so — as in JSON — they are written as an array `[a,b,...]`,
+    /// which is also valid at the top level (a bare `(...)` is not).
     #[inline]
     pub fn begin_tuple(&mut self) -> Result<()> {
+        self.top_seq_direct = false;
         self.push_separator();
-        self.buf.push(b'(');
+        self.buf.push(b'[');
         self.in_tuple = true;
         self.first = true;
+        self.tuple_frames.push((self.buf.len(), 0));
         Ok(())
     }
 
     /// Encode one tuple element.
     #[inline]
     pub fn tuple_element<T: AsunEncode + ?Sized>(&mut self, value: &T) -> Result<()> {
-        if !self.first {
-            self.buf.push(b',');
+        if let Some(frame) = self.tuple_frames.last_mut() {
+            if frame.1 > 0 {
+                self.buf.push(b',');
+            }
+            frame.1 += 1;
         }
         self.first = true;
         self.in_tuple = true;
         value.encode(&mut *self)
     }
 
-    /// Close a tuple `)`.
+    /// Close a tuple `]`.
     #[inline]
     pub fn end_tuple(&mut self) -> Result<()> {
-        self.buf.push(b')');
+        if let Some((start, count)) = self.tuple_frames.pop()
+            && count == 1
+            && self.buf.len() == start
+        {
+            // `[]` is the empty array; a single null element must be explicit.
+            self.buf.extend_from_slice(b"null");
+        }
+        self.buf.push(b']');
         self.first = false;
+        // A tuple is a heterogeneous array: its binding is the untyped `@[]`.
+        self.clear_value_hint();
+        if !self.skip_schema_capture {
+            self.nested_schema = Some(b"[]".to_vec());
+        }
         Ok(())
     }
 
-    /// Begin a tuple enum variant `(variant`. Elements follow via `element`.
+    /// Begin a tuple enum variant `[variant`. Elements follow via `element`.
     pub fn begin_tuple_variant(&mut self, variant: &str) -> Result<TupleEncoder> {
         self.push_separator();
-        self.buf.push(b'(');
-        self.buf.extend_from_slice(variant.as_bytes());
+        self.buf.push(b'[');
+        write_str_value(&mut self.buf, variant);
+        self.in_tuple = true;
+        self.top_seq_direct = false;
         Ok(TupleEncoder { first: false })
     }
 
     /// Begin a struct. Mirrors the previous `serialize_struct`.
     pub fn begin_struct(&mut self, len: usize) -> Result<StructEncoder> {
         let is_top = !self.in_tuple;
-        let capture_for_seq = !is_top && self.in_top_seq && self.top_seq_fields.is_none();
+        let capture_for_seq =
+            !is_top && self.in_top_seq && self.top_seq_direct && self.top_seq_fields.is_none();
+        self.top_seq_direct = false;
         // Skip per-row schema bookkeeping for the 2nd+ rows of a homogeneous
         // Vec<Struct>. The first row populated `top_seq_fields/_types/_schemas`,
         // and subsequent rows produce the same schema fragment by construction.
@@ -650,6 +731,7 @@ impl Encoder {
                 is_top: true,
                 capture_for_seq: false,
                 skip_schema: false,
+                variant: false,
                 first: true,
             })
         } else {
@@ -678,17 +760,19 @@ impl Encoder {
                 is_top: false,
                 capture_for_seq,
                 skip_schema: skip,
+                variant: false,
                 first: true,
             })
         }
     }
 
-    /// Begin a struct enum variant `(variant,`. Fields follow via `element`.
+    /// Begin a struct enum variant `[variant,`. Fields follow via `element`.
     pub fn begin_struct_variant(&mut self, variant: &str) -> Result<StructEncoder> {
         self.push_separator();
-        self.buf.push(b'(');
-        self.buf.extend_from_slice(variant.as_bytes());
-        self.buf.push(b',');
+        self.buf.push(b'[');
+        write_str_value(&mut self.buf, variant);
+        self.in_tuple = true;
+        self.top_seq_direct = false;
         Ok(StructEncoder {
             fields: Vec::new(),
             field_types: Vec::new(),
@@ -696,7 +780,9 @@ impl Encoder {
             is_top: false,
             capture_for_seq: false,
             skip_schema: false,
-            first: true,
+            variant: true,
+            // The variant name is slot 0, so every field is preceded by `,`.
+            first: false,
         })
     }
 }
@@ -718,6 +804,10 @@ pub struct SeqEncoder {
     /// when an outer seq owns the flag (e.g. inner primitive `Vec<i64>`
     /// running while the outer `Vec<Struct>` is still iterating).
     skip_was_set: bool,
+    /// Buffer offset where this sequence's elements start.
+    data_start: usize,
+    /// An element wrote nothing (a null). Rows of `[{schema}]:` can't be null.
+    has_null: bool,
 }
 
 impl SeqEncoder {
@@ -729,7 +819,18 @@ impl SeqEncoder {
         let was_first = self.first;
         self.first = false;
         enc.first = true;
-        let result = value.encode(&mut *enc);
+        let result = if self.is_top_seq {
+            // Only top-level rows need the direct-struct flag and null-row
+            // tracking; nested sequences stay on the lean path.
+            let before = enc.buf.len();
+            enc.top_seq_direct = true;
+            let r = value.encode(&mut *enc);
+            enc.top_seq_direct = false;
+            self.has_null |= enc.buf.len() == before;
+            r
+        } else {
+            value.encode(&mut *enc)
+        };
         // After the first homogeneous struct row of a top-level seq has been
         // serialized, fields/types/schemas are cached on the encoder. Tell
         // subsequent rows to skip per-row schema bookkeeping.
@@ -763,7 +864,18 @@ impl SeqEncoder {
         if let Some(cached) = self.cached_nested_schema.take() {
             enc.nested_schema = Some(cached);
         }
+        // `[]` is the empty array; a single null element must be explicit.
+        // One element that wrote nothing (2+ elements always wrote a comma).
+        let lone_null = !self.first && enc.buf.len() == self.data_start;
         if self.is_top_seq {
+            if enc.top_seq_fields.is_some() && self.has_null {
+                return Err(Error::msg(
+                    "cannot encode a null row in a [{schema}]: sequence",
+                ));
+            }
+            if lone_null {
+                enc.buf.extend_from_slice(b"null");
+            }
             if let Some(ref fields) = enc.top_seq_fields {
                 // Struct elements: build the header once, then slide the
                 // already-serialized payload aside to make room for it.
@@ -800,6 +912,9 @@ impl SeqEncoder {
             }
             enc.in_top_seq = false;
         } else {
+            if lone_null {
+                enc.buf.extend_from_slice(b"null");
+            }
             enc.buf.push(b']');
             // The schema-fragment bubble-up below feeds the parent struct's
             // schema header. When the encoder is in skip-schema mode (rows
@@ -858,8 +973,9 @@ impl TupleEncoder {
 
     #[inline]
     pub fn end(self, enc: &mut Encoder) -> Result<()> {
-        enc.buf.push(b')');
+        enc.buf.push(b']');
         enc.first = false;
+        enc.clear_value_hint();
         Ok(())
     }
 }
@@ -882,6 +998,8 @@ pub struct StructEncoder {
     /// True for the 2nd+ row of a homogeneous `Vec<Struct>`: skip recording field
     /// names / types / nested schemas, since the seq's first row already did.
     skip_schema: bool,
+    /// A struct enum variant body `[variant,f1,f2]`: positional, no schema.
+    variant: bool,
     first: bool,
 }
 
@@ -941,6 +1059,12 @@ impl StructEncoder {
     }
 
     pub fn end(self, enc: &mut Encoder) -> Result<()> {
+        if self.variant {
+            enc.buf.push(b']');
+            enc.first = false;
+            enc.clear_value_hint();
+            return Ok(());
+        }
         if self.is_top {
             enc.buf.push(b')');
             // Build the top-level header once, then slide the tuple payload

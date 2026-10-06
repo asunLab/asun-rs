@@ -288,7 +288,7 @@ fn matrix_n2_untyped_nested_vec_extra_fields_dropped() {
 
 #[test]
 fn matrix_o1_typed_optional_skip_trailing() {
-    let input = "[{id@int,label@str?,score@float?,flag@bool}]:(1,hello,95.5,true),(2,,,false)";
+    let input = "[{id@int,label@str,score@float,flag@bool}]:(1,hello,95.5,true),(2,,,false)";
     let dst: Vec<MatrixDstFewerOptionals> = decode(input).unwrap();
     assert_eq!(
         dst,
@@ -423,7 +423,7 @@ fn matrix_p2_untyped_no_overlap_defaults() {
 
 #[test]
 fn matrix_n4_typed_nested_optional_subset() {
-    let input = "[{id@int,profile@{name@str,nick@str?,score@float?},active@bool}]:(1,(Alice,ally,9.5),true),(2,(Bob,,),false)";
+    let input = "[{id@int,profile@{name@str,nick@str,score@float},active@bool}]:(1,(Alice,ally,9.5),true),(2,(Bob,,),false)";
     let dst: Vec<MatrixUserWithNestedOptional> = decode(input).unwrap();
     assert_eq!(
         dst,

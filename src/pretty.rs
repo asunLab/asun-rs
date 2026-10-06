@@ -56,28 +56,54 @@ pub fn pretty_format(src: &[u8]) -> String {
     unsafe { String::from_utf8_unchecked(f.out) }
 }
 
+/// Length of the token at `i` whose bytes are never structural and must be
+/// copied verbatim: a quoted string, a `\x` escape inside a plain string, or a
+/// comment. `0` when `src[i]` starts none of them. Unterminated tokens run to
+/// the end of the input.
+#[inline]
+fn atom_len(src: &[u8], i: usize) -> usize {
+    let n = src.len();
+    match src[i] {
+        b'"' => {
+            let mut j = i + 1;
+            while j < n {
+                match src[j] {
+                    b'\\' => j += 2,
+                    b'"' => return j + 1 - i,
+                    _ => j += 1,
+                }
+            }
+            n - i
+        }
+        b'\\' => (n - i).min(2),
+        b'/' if i + 1 < n && src[i + 1] == b'*' => {
+            let mut j = i + 2;
+            while j + 1 < n {
+                if src[j] == b'*' && src[j + 1] == b'/' {
+                    return j + 2 - i;
+                }
+                j += 1;
+            }
+            n - i
+        }
+        _ => 0,
+    }
+}
+
 fn build_match_table(src: &[u8]) -> Vec<i32> {
     let n = src.len();
     let mut mat = vec![-1i32; n];
     let mut stack: Vec<usize> = Vec::with_capacity(32);
-    let mut in_quote = false;
     let mut i = 0;
     while i < n {
-        if in_quote {
-            if src[i] == b'\\' && i + 1 < n {
-                i += 2;
-                continue;
-            }
-            if src[i] == b'"' {
-                in_quote = false;
-            }
-            i += 1;
+        let atom = atom_len(src, i);
+        if atom > 0 {
+            i += atom;
             continue;
         }
         match src[i] {
-            b'"' => in_quote = true,
-            b'{' | b'(' | b'[' | b'<' => stack.push(i),
-            b'}' | b')' | b']' | b'>' => {
+            b'{' | b'(' | b'[' => stack.push(i),
+            b'}' | b')' | b']' => {
                 if let Some(j) = stack.pop() {
                     mat[j] = i as i32;
                     mat[i] = j as i32;
@@ -175,7 +201,7 @@ impl<'a> PrettyFmt<'a> {
             return;
         }
         let ch = self.src[self.pos];
-        if ch != b'{' && ch != b'(' && ch != b'[' && ch != b'<' {
+        if ch != b'{' && ch != b'(' && ch != b'[' {
             self.write_value();
             return;
         }
@@ -231,7 +257,9 @@ impl<'a> PrettyFmt<'a> {
 
         let mut first = true;
         while self.pos < close {
-            if self.src[self.pos] == b',' {
+            // The comma is consumed only between slots: a leading `,` is the
+            // end of an empty (null) first slot and must be kept.
+            if !first && self.src[self.pos] == b',' {
                 self.pos += 1;
             }
             if !first {
@@ -252,10 +280,10 @@ impl<'a> PrettyFmt<'a> {
     fn write_element(&mut self, boundary: usize) {
         while self.pos < boundary && self.src[self.pos] != b',' {
             let ch = self.src[self.pos];
-            if ch == b'{' || ch == b'(' || ch == b'[' || ch == b'<' {
+            if ch == b'{' || ch == b'(' || ch == b'[' {
                 self.write_group();
-            } else if ch == b'"' {
-                self.write_quoted();
+            } else if atom_len(self.src, self.pos) > 0 {
+                self.write_atom();
             } else {
                 self.out.push(ch);
                 self.pos += 1;
@@ -266,11 +294,11 @@ impl<'a> PrettyFmt<'a> {
     fn write_value(&mut self) {
         while self.pos < self.src.len() {
             let ch = self.src[self.pos];
-            if ch == b',' || ch == b')' || ch == b'}' || ch == b']' || ch == b'>' {
+            if ch == b',' || ch == b')' || ch == b'}' || ch == b']' {
                 break;
             }
-            if ch == b'"' {
-                self.write_quoted();
+            if atom_len(self.src, self.pos) > 0 {
+                self.write_atom();
             } else {
                 self.out.push(ch);
                 self.pos += 1;
@@ -278,49 +306,29 @@ impl<'a> PrettyFmt<'a> {
         }
     }
 
-    fn write_quoted(&mut self) {
-        self.out.push(b'"');
-        self.pos += 1;
-        while self.pos < self.src.len() {
-            let ch = self.src[self.pos];
-            self.out.push(ch);
-            self.pos += 1;
-            if ch == b'\\' && self.pos < self.src.len() {
-                self.out.push(self.src[self.pos]);
-                self.pos += 1;
-            } else if ch == b'"' {
-                break;
-            }
-        }
+    fn write_atom(&mut self) {
+        let end = self.pos + atom_len(self.src, self.pos);
+        self.out.extend_from_slice(&self.src[self.pos..end]);
+        self.pos = end;
     }
 
     fn write_inline(&mut self, start: usize, end: usize) {
         let mut depth: i32 = 0;
-        let mut in_quote = false;
         let mut i = start;
         while i < end {
             let ch = self.src[i];
-            if in_quote {
-                self.out.push(ch);
-                if ch == b'\\' && i + 1 < end {
-                    i += 1;
-                    self.out.push(self.src[i]);
-                } else if ch == b'"' {
-                    in_quote = false;
-                }
-                i += 1;
+            let atom = atom_len(self.src, i).min(end - i);
+            if atom > 0 {
+                self.out.extend_from_slice(&self.src[i..i + atom]);
+                i += atom;
                 continue;
             }
             match ch {
-                b'"' => {
-                    in_quote = true;
-                    self.out.push(ch);
-                }
-                b'{' | b'(' | b'[' | b'<' => {
+                b'{' | b'(' | b'[' => {
                     depth += 1;
                     self.out.push(ch);
                 }
-                b'}' | b')' | b']' | b'>' => {
+                b'}' | b')' | b']' => {
                     depth -= 1;
                     self.out.push(ch);
                 }

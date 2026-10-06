@@ -345,49 +345,49 @@ fn first_marked_byte(mask: u64) -> usize {
 // High-level SIMD string operations
 // ============================================================================
 
-/// Bytes that force an ASUN string to be quoted.
-static NEEDS_QUOTE: [bool; 256] = {
+/// Bytes that may force an ASUN string to be quoted (GRAMMAR.abnf `psafe`).
+///
+/// `/` is only a candidate: it forces quoting when followed by `*`, which the
+/// caller checks. Space is allowed inside a plain string, so only a leading or
+/// trailing one matters, which the caller also checks. `:` `@` `*` `<` `>` are
+/// ordinary characters in data. DEL is kept so its `\u007f` escape and the
+/// escape-free-prefix contract of [`simd_find_special`] stay in sync.
+pub(crate) static NEEDS_QUOTE: [bool; 256] = {
     let mut t = [false; 256];
     let mut j = 0usize;
-    while j < 33 {
-        // 0x00..=0x1f plus 0x20 (space)
+    while j < 0x20 {
         t[j] = true;
         j += 1;
     }
     t[b',' as usize] = true;
-    t[b'@' as usize] = true;
     t[b'(' as usize] = true;
     t[b')' as usize] = true;
     t[b'[' as usize] = true;
     t[b']' as usize] = true;
     t[b'{' as usize] = true;
     t[b'}' as usize] = true;
-    t[b':' as usize] = true;
-    t[b'<' as usize] = true;
-    t[b'>' as usize] = true;
     t[b'/' as usize] = true;
-    t[b'*' as usize] = true;
     t[b'"' as usize] = true;
     t[b'\\' as usize] = true;
     t[0x7f] = true;
     t
 };
 
-/// Offset of the first byte requiring ASUN quoting, or `bytes.len()` if there
-/// is none.
+/// Offset at or after `start` of the first byte that may require ASUN quoting
+/// (see [`NEEDS_QUOTE`]), or `bytes.len()` if there is none.
 ///
 /// Returning the offset rather than a bool lets the caller skip re-scanning the
 /// clean prefix when it goes on to escape the string — escape-worthy bytes are
-/// a subset of quote-worthy ones, so everything before this index is known to
-/// be copyable verbatim.
+/// a subset of these, so everything before this index is known to be copyable
+/// verbatim.
 #[inline]
-pub fn simd_find_special(bytes: &[u8]) -> usize {
+pub fn simd_find_special(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
-    let mut i = 0;
+    let mut i = start;
 
     // Short strings (names, enum tags, city names…) are the overwhelming
     // majority; go straight to the table scan and skip all vector setup.
-    if len < LANES {
+    if len - i < LANES {
         while i < len {
             if NEEDS_QUOTE[bytes[i] as usize] {
                 return i;
@@ -398,21 +398,16 @@ pub fn simd_find_special(bytes: &[u8]) -> usize {
     }
 
     unsafe {
-        let v_20 = splat(0x20);
+        let v_1f = splat(0x1f);
         let v_del = splat(0x7f);
         let v_comma = splat(b',');
-        let v_at = splat(b'@');
         let v_lparen = splat(b'(');
         let v_rparen = splat(b')');
         let v_lbracket = splat(b'[');
         let v_rbracket = splat(b']');
         let v_lbrace = splat(b'{');
         let v_rbrace = splat(b'}');
-        let v_colon = splat(b':');
-        let v_lt = splat(b'<');
-        let v_gt = splat(b'>');
         let v_slash = splat(b'/');
-        let v_star = splat(b'*');
         let v_quote = splat(b'"');
         let v_backslash = splat(b'\\');
 
@@ -420,27 +415,18 @@ pub fn simd_find_special(bytes: &[u8]) -> usize {
             let chunk = load(bytes.as_ptr().add(i));
             let mask = movemask(or(
                 or(
+                    or(cmple(chunk, v_1f), cmpeq(chunk, v_del)),
                     or(
-                        or(cmple(chunk, v_20), cmpeq(chunk, v_del)),
-                        or(
-                            or(cmpeq(chunk, v_comma), cmpeq(chunk, v_at)),
-                            or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
-                        ),
-                    ),
-                    or(
-                        or(cmpeq(chunk, v_lbracket), cmpeq(chunk, v_rbracket)),
-                        or(cmpeq(chunk, v_lbrace), cmpeq(chunk, v_rbrace)),
+                        or(cmpeq(chunk, v_comma), cmpeq(chunk, v_slash)),
+                        or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
                     ),
                 ),
                 or(
                     or(
-                        or(cmpeq(chunk, v_colon), cmpeq(chunk, v_lt)),
-                        or(cmpeq(chunk, v_gt), cmpeq(chunk, v_slash)),
+                        or(cmpeq(chunk, v_lbracket), cmpeq(chunk, v_rbracket)),
+                        or(cmpeq(chunk, v_lbrace), cmpeq(chunk, v_rbrace)),
                     ),
-                    or(
-                        or(cmpeq(chunk, v_star), cmpeq(chunk, v_quote)),
-                        cmpeq(chunk, v_backslash),
-                    ),
+                    or(cmpeq(chunk, v_quote), cmpeq(chunk, v_backslash)),
                 ),
             ));
             if mask != 0 {
@@ -462,7 +448,7 @@ pub fn simd_find_special(bytes: &[u8]) -> usize {
 /// SIMD-accelerated check: does `s` contain any byte that needs ASUN quoting?
 #[inline]
 pub fn simd_has_special_chars(bytes: &[u8]) -> bool {
-    simd_find_special(bytes) < bytes.len()
+    simd_find_special(bytes, 0) < bytes.len()
 }
 
 /// SIMD-accelerated: find first byte needing escape in a string being serialized.
@@ -522,10 +508,11 @@ pub fn simd_find_escape(bytes: &[u8], start: usize) -> usize {
     len
 }
 
-/// SIMD-accelerated: find first quote (`"`) or backslash (`\`) in bytes.
-/// Used for fast-path quoted string scanning during deserialization.
+/// SIMD-accelerated: find the first quote (`"`), backslash (`\`) or raw
+/// control character (`< 0x20`) at or after `start`. Used for quoted string
+/// scanning during decoding; a control character there is an error (JSON rule).
 ///
-/// Returns the offset from `start`, or `len` if neither found.
+/// Returns the absolute offset, or `len` if none found.
 #[inline]
 pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
@@ -533,7 +520,7 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
 
     if i + 8 <= len {
         let w = word_at(bytes, i);
-        let m = eq_byte_mask(w, b'"') | eq_byte_mask(w, b'\\');
+        let m = eq_byte_mask(w, b'"') | eq_byte_mask(w, b'\\') | le_byte_mask(w, 0x1f);
         if m != 0 {
             return i + first_marked_byte(m);
         }
@@ -543,10 +530,14 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
     unsafe {
         let v_quote = splat(b'"');
         let v_backslash = splat(b'\\');
+        let v_1f = splat(0x1f);
 
         while i + LANES <= len {
             let chunk = load(bytes.as_ptr().add(i));
-            let mask = movemask(or(cmpeq(chunk, v_quote), cmpeq(chunk, v_backslash)));
+            let mask = movemask(or(
+                or(cmpeq(chunk, v_quote), cmpeq(chunk, v_backslash)),
+                cmple(chunk, v_1f),
+            ));
             if mask != 0 {
                 return i + first_set_bit(mask) as usize;
             }
@@ -557,7 +548,7 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
     // Scalar tail
     while i < len {
         let b = bytes[i];
-        if b == b'"' || b == b'\\' {
+        if b == b'"' || b == b'\\' || b < 0x20 {
             return i;
         }
         i += 1;
@@ -565,44 +556,78 @@ pub fn simd_find_quote_or_backslash(bytes: &[u8], start: usize) -> usize {
     len
 }
 
-/// SIMD-accelerated: find first delimiter for plain (unquoted) value parsing.
-/// Delimiters: `,` `)` `]` `:` `\`
+/// Bytes that end (or need a closer look inside) a plain value: the
+/// structural set `, ( ) [ ] { } "`, `\` (escape), `/` (comment if followed
+/// by `*`) and every control character. TAB is a control character but legal
+/// inside a plain string; the caller steps over it.
+static PLAIN_STOP: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut j = 0usize;
+    while j < 0x20 {
+        t[j] = true;
+        j += 1;
+    }
+    t[b',' as usize] = true;
+    t[b'(' as usize] = true;
+    t[b')' as usize] = true;
+    t[b'[' as usize] = true;
+    t[b']' as usize] = true;
+    t[b'{' as usize] = true;
+    t[b'}' as usize] = true;
+    t[b'"' as usize] = true;
+    t[b'\\' as usize] = true;
+    t[b'/' as usize] = true;
+    t
+};
+
+/// SIMD-accelerated: find the first [`PLAIN_STOP`] byte at or after `start`
+/// for plain (unquoted) value parsing.
 ///
-/// Returns the offset from `start`, or `len` if none found.
+/// Returns the absolute offset, or `len` if none found.
 #[inline]
 pub fn simd_find_plain_delimiter(bytes: &[u8], start: usize) -> usize {
     let len = bytes.len();
     let mut i = start;
 
-    // Values are short and delimiter-terminated, so this word almost always
-    // contains the answer; the vector loop below is the rare case.
-    if i + 8 <= len {
-        let w = word_at(bytes, i);
-        let m = eq_byte_mask(w, b',')
-            | eq_byte_mask(w, b')')
-            | eq_byte_mask(w, b']')
-            | eq_byte_mask(w, b':')
-            | eq_byte_mask(w, b'\\');
-        if m != 0 {
-            return i + first_marked_byte(m);
+    // Values are short and delimiter-terminated, so the answer is almost always
+    // within the first few bytes: a table walk beats any vector setup there.
+    let probe_end = len.min(i + LANES);
+    while i < probe_end {
+        if PLAIN_STOP[bytes[i] as usize] {
+            return i;
         }
-        i += 8;
+        i += 1;
     }
 
     unsafe {
+        let v_1f = splat(0x1f);
         let v_comma = splat(b',');
+        let v_lparen = splat(b'(');
         let v_rparen = splat(b')');
+        let v_lbracket = splat(b'[');
         let v_rbracket = splat(b']');
-        let v_colon = splat(b':');
+        let v_lbrace = splat(b'{');
+        let v_rbrace = splat(b'}');
+        let v_quote = splat(b'"');
         let v_backslash = splat(b'\\');
+        let v_slash = splat(b'/');
 
         while i + LANES <= len {
             let chunk = load(bytes.as_ptr().add(i));
             let mask = movemask(or(
-                or(cmpeq(chunk, v_comma), cmpeq(chunk, v_rparen)),
                 or(
-                    or(cmpeq(chunk, v_rbracket), cmpeq(chunk, v_colon)),
-                    cmpeq(chunk, v_backslash),
+                    or(cmple(chunk, v_1f), cmpeq(chunk, v_comma)),
+                    or(cmpeq(chunk, v_lparen), cmpeq(chunk, v_rparen)),
+                ),
+                or(
+                    or(
+                        or(cmpeq(chunk, v_lbracket), cmpeq(chunk, v_rbracket)),
+                        or(cmpeq(chunk, v_lbrace), cmpeq(chunk, v_rbrace)),
+                    ),
+                    or(
+                        cmpeq(chunk, v_quote),
+                        or(cmpeq(chunk, v_backslash), cmpeq(chunk, v_slash)),
+                    ),
                 ),
             ));
             if mask != 0 {
@@ -614,10 +639,10 @@ pub fn simd_find_plain_delimiter(bytes: &[u8], start: usize) -> usize {
 
     // Scalar tail
     while i < len {
-        match bytes[i] {
-            b',' | b')' | b']' | b':' | b'\\' => return i,
-            _ => i += 1,
+        if PLAIN_STOP[bytes[i] as usize] {
+            return i;
         }
+        i += 1;
     }
     len
 }
@@ -786,20 +811,20 @@ mod tests {
 
     #[test]
     fn test_simd_has_special_chars() {
-        // Space is now considered special (forces quoting per SPEC §S2).
-        assert!(simd_has_special_chars(b"hello world"));
+        // Interior spaces, `@`, `:` and `*` are plain content (GRAMMAR psafe).
+        assert!(!simd_has_special_chars(b"hello world"));
         assert!(!simd_has_special_chars(b"helloworld"));
         assert!(simd_has_special_chars(b"hello,world"));
-        assert!(simd_has_special_chars(b"hello@world"));
+        assert!(!simd_has_special_chars(b"hello@world"));
         assert!(simd_has_special_chars(b"hello(world"));
         assert!(simd_has_special_chars(b"hello)world"));
         assert!(simd_has_special_chars(b"hello[world"));
         assert!(simd_has_special_chars(b"hello]world"));
         assert!(simd_has_special_chars(b"hello{world"));
         assert!(simd_has_special_chars(b"hello}world"));
-        assert!(simd_has_special_chars(b"hello:world"));
-        assert!(simd_has_special_chars(b"hello/world"));
-        assert!(simd_has_special_chars(b"hello*world"));
+        assert!(!simd_has_special_chars(b"hello:world"));
+        assert!(simd_has_special_chars(b"hello/world")); // candidate; caller checks `/*`
+        assert!(!simd_has_special_chars(b"hello*world"));
         assert!(simd_has_special_chars(b"hello\"world"));
         assert!(simd_has_special_chars(b"hello\\world"));
         assert!(simd_has_special_chars(b"hello\nworld"));
@@ -825,6 +850,11 @@ mod tests {
         assert_eq!(simd_find_quote_or_backslash(b"hello\"world", 0), 5);
         assert_eq!(simd_find_quote_or_backslash(b"hello\\world", 0), 5);
         assert_eq!(simd_find_quote_or_backslash(b"abcdefghijklmnop\"", 0), 16);
+        assert_eq!(simd_find_quote_or_backslash(b"hello\nworld", 0), 5);
+        assert_eq!(
+            simd_find_quote_or_backslash(b"abcdefghijklmnopq\x01", 0),
+            17
+        );
     }
 
     #[test]
@@ -833,6 +863,16 @@ mod tests {
         assert_eq!(simd_find_plain_delimiter(b"hello,world", 0), 5);
         assert_eq!(simd_find_plain_delimiter(b"hello)world", 0), 5);
         assert_eq!(simd_find_plain_delimiter(b"hello]world", 0), 5);
+        assert_eq!(simd_find_plain_delimiter(b"a@b:c*d", 0), 7);
+        assert_eq!(simd_find_plain_delimiter(b"x/y", 0), 1);
+        assert_eq!(
+            simd_find_plain_delimiter(b"abcdefghijklmnopqrstuvwxyz{", 0),
+            26
+        );
+        assert_eq!(
+            simd_find_plain_delimiter(b"abcdefghijklmnopqrstuvwxyz\"", 0),
+            26
+        );
     }
 
     #[test]
