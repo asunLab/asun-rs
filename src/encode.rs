@@ -130,6 +130,20 @@ fn ryu_f64(buf: &mut Vec<u8>, v: f64) {
 /// the size of the whole payload plus a full copy of it; this is a single
 /// `memmove` inside the buffer we already own.
 #[inline]
+/// Insert `bytes` at offset `at`, sliding the tail of `buf` right.
+fn insert_at(buf: &mut Vec<u8>, at: usize, bytes: &[u8]) {
+    let h = bytes.len();
+    let tail = buf.len() - at;
+    buf.reserve(h);
+    // SAFETY: capacity covers `len + h`; the tail move may overlap (`copy`).
+    unsafe {
+        let p = buf.as_mut_ptr().add(at);
+        core::ptr::copy(p, p.add(h), tail);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, h);
+        buf.set_len(buf.len() + h);
+    }
+}
+
 fn prepend(buf: &mut Vec<u8>, header: &[u8]) {
     let h = header.len();
     if h == 0 {
@@ -250,7 +264,7 @@ fn quote_scan(s: &str) -> Option<usize> {
 fn write_str_value(buf: &mut Vec<u8>, s: &str) {
     match quote_scan(s) {
         Some(first_escape) => simd::simd_write_escaped_from(buf, s.as_bytes(), first_escape),
-        None => buf.extend_from_slice(s.as_bytes()),
+        None => simd::push_bytes(buf, s.as_bytes()),
     }
 }
 
@@ -565,6 +579,36 @@ impl Encoder {
         Ok(())
     }
 
+    /// Write `{name@binding,...}]:` for a top-level `Vec<Struct>` from the
+    /// schema captured on its first row (the leading `[` is already out).
+    fn write_top_seq_header(&self, out: &mut Vec<u8>) {
+        let fields = self.top_seq_fields.as_deref().unwrap_or_default();
+        out.push(b'{');
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            push_schema_field_name(out, f);
+            // Nested schema takes priority over type hint
+            let nested = self
+                .top_seq_field_schemas
+                .as_ref()
+                .and_then(|schemas| schemas.get(i))
+                .and_then(|s| s.as_ref());
+            if let Some(schema) = nested {
+                out.push(b'@');
+                out.extend_from_slice(schema);
+            } else if self.typed
+                && let Some(types) = &self.top_seq_field_types
+                && let Some(Some(type_hint)) = types.get(i)
+            {
+                out.push(b'@');
+                out.extend_from_slice(type_hint.as_bytes());
+            }
+        }
+        out.extend_from_slice(b"}]:");
+    }
+
     /// Forget the hint / schema fragment that the contents of a tuple or enum
     /// payload left behind: a heterogeneous value must not hand its first
     /// element's type to the enclosing field's binding.
@@ -617,6 +661,10 @@ impl Encoder {
             }
             self.in_top_seq = true;
             self.in_tuple = true;
+            // Both top-level forms start with `[`: `[{schema}]:rows` and
+            // `[v,...]`. Writing it now means only the first row has to move
+            // when the header is inserted.
+            self.buf.push(b'[');
             self.top_seq_data_start = self.buf.len();
             self.top_seq_fields = None;
             self.top_seq_field_types = None;
@@ -627,6 +675,7 @@ impl Encoder {
                 skip_was_set: false,
                 data_start: self.buf.len(),
                 has_null: false,
+                header_done: false,
             })
         } else {
             if let Some(len) = len {
@@ -642,6 +691,7 @@ impl Encoder {
                 skip_was_set: false,
                 data_start: self.buf.len(),
                 has_null: false,
+                header_done: false,
             })
         }
     }
@@ -719,47 +769,20 @@ impl Encoder {
             self.buf.push(b'(');
             self.in_tuple = true;
             Ok(StructEncoder {
-                fields: Vec::with_capacity(len),
-                // Type hints are only ever recorded (and read back) in typed
-                // mode; allocating them otherwise is a wasted malloc per struct.
-                field_types: if self.typed {
-                    Vec::with_capacity(len)
-                } else {
-                    Vec::new()
-                },
-                field_schemas: Vec::with_capacity(len),
+                capture: Some(Capture::with_capacity(len, self.typed)),
                 is_top: true,
                 capture_for_seq: false,
-                skip_schema: false,
                 variant: false,
                 first: true,
             })
         } else {
             self.push_separator();
             self.buf.push(b'(');
-            // When skipping, allocate empty Vecs (no capacity) — they won't be
-            // pushed into. This keeps the struct field types stable while
-            // avoiding per-row 3 × len allocations.
-            let (fields, field_types, field_schemas) = if skip {
-                (Vec::new(), Vec::new(), Vec::new())
-            } else {
-                (
-                    Vec::with_capacity(len),
-                    if self.typed {
-                        Vec::with_capacity(len)
-                    } else {
-                        Vec::new()
-                    },
-                    Vec::with_capacity(len),
-                )
-            };
             Ok(StructEncoder {
-                fields,
-                field_types,
-                field_schemas,
+                // Rows 2+ of a homogeneous Vec<Struct> reuse row 1's schema.
+                capture: (!skip).then(|| Capture::with_capacity(len, self.typed)),
                 is_top: false,
                 capture_for_seq,
-                skip_schema: skip,
                 variant: false,
                 first: true,
             })
@@ -774,12 +797,9 @@ impl Encoder {
         self.in_tuple = true;
         self.top_seq_direct = false;
         Ok(StructEncoder {
-            fields: Vec::new(),
-            field_types: Vec::new(),
-            field_schemas: Vec::new(),
+            capture: None,
             is_top: false,
             capture_for_seq: false,
-            skip_schema: false,
             variant: true,
             // The variant name is slot 0, so every field is preceded by `,`.
             first: false,
@@ -806,6 +826,8 @@ pub struct SeqEncoder {
     skip_was_set: bool,
     /// Buffer offset where this sequence's elements start.
     data_start: usize,
+    /// Top-level `Vec<Struct>`: the `{schema}]:` header has been inserted.
+    header_done: bool,
     /// An element wrote nothing (a null). Rows of `[{schema}]:` can't be null.
     has_null: bool,
 }
@@ -834,9 +856,16 @@ impl SeqEncoder {
         // After the first homogeneous struct row of a top-level seq has been
         // serialized, fields/types/schemas are cached on the encoder. Tell
         // subsequent rows to skip per-row schema bookkeeping.
-        if was_first && self.is_top_seq && enc.top_seq_fields.is_some() {
+        if self.is_top_seq && !self.header_done && enc.top_seq_fields.is_some() {
             enc.skip_schema_capture = true;
             self.skip_was_set = true;
+            // The header is fully known after the first struct row: insert it
+            // in front of that row now rather than in front of every row at
+            // the end.
+            self.header_done = true;
+            let mut header = Vec::with_capacity(64);
+            enc.write_top_seq_header(&mut header);
+            insert_at(&mut enc.buf, enc.top_seq_data_start, &header);
         }
         // For nested Vec<Struct>: row 1's StructEncoder::end() bubbled up a
         // schema fragment via `nested_schema`. Stash it on the seq so we can
@@ -876,38 +905,8 @@ impl SeqEncoder {
             if lone_null {
                 enc.buf.extend_from_slice(b"null");
             }
-            if let Some(ref fields) = enc.top_seq_fields {
-                // Struct elements: build the header once, then slide the
-                // already-serialized payload aside to make room for it.
-                let mut out = Vec::with_capacity(fields.len() * 16 + 8);
-                out.extend_from_slice(b"[{");
-                for (i, f) in fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push(b',');
-                    }
-                    out.extend_from_slice(f.as_bytes());
-                    // Nested schema takes priority over type hint
-                    let has_nested = enc
-                        .top_seq_field_schemas
-                        .as_ref()
-                        .and_then(|schemas| schemas.get(i))
-                        .and_then(|s| s.as_ref());
-                    if let Some(schema) = has_nested {
-                        out.push(b'@');
-                        out.extend_from_slice(schema);
-                    } else if enc.typed
-                        && let Some(ref field_types) = enc.top_seq_field_types
-                        && let Some(Some(type_hint)) = field_types.get(i)
-                    {
-                        out.push(b'@');
-                        out.extend_from_slice(type_hint.as_bytes());
-                    }
-                }
-                out.extend_from_slice(b"}]:");
-                prepend(&mut enc.buf, &out);
-            } else {
-                // Non-struct elements (primitive Vec): wrap in [...]
-                prepend(&mut enc.buf, b"[");
+            if !self.header_done {
+                // Non-struct elements (primitive Vec): `[` is already written.
                 enc.buf.push(b']');
             }
             enc.in_top_seq = false;
@@ -988,19 +987,62 @@ impl TupleEncoder {
 /// [`Encoder::begin_struct`]. Skipped fields are handled by simply not calling
 /// [`StructEncoder::field`]. Part of the derive's plumbing.
 pub struct StructEncoder {
-    fields: Vec<&'static str>,
-    /// Type hints collected for each field (only when typed mode is on)
-    field_types: Vec<Option<&'static str>>,
-    /// Nested schema fragments for struct/vec-of-struct fields
-    field_schemas: Vec<Option<Vec<u8>>>,
+    /// Schema bookkeeping, present only when this struct must emit a schema
+    /// header or fragment. Rows 2+ of a homogeneous `Vec<Struct>` (the bulk of
+    /// any large document) and enum variant bodies carry `None`, so they cost
+    /// no allocation and no drop work.
+    capture: Option<Box<Capture>>,
     is_top: bool,
     capture_for_seq: bool,
-    /// True for the 2nd+ row of a homogeneous `Vec<Struct>`: skip recording field
-    /// names / types / nested schemas, since the seq's first row already did.
-    skip_schema: bool,
     /// A struct enum variant body `[variant,f1,f2]`: positional, no schema.
     variant: bool,
     first: bool,
+}
+
+/// Field names, type hints and nested schema fragments of one struct, used to
+/// build its schema text.
+#[derive(Default)]
+struct Capture {
+    fields: Vec<&'static str>,
+    /// Type hints collected for each field (only when typed mode is on)
+    types: Vec<Option<&'static str>>,
+    /// Nested schema fragments for struct/vec-of-struct fields
+    schemas: Vec<Option<Vec<u8>>>,
+}
+
+impl Capture {
+    fn with_capacity(len: usize, typed: bool) -> Box<Self> {
+        Box::new(Capture {
+            fields: Vec::with_capacity(len),
+            // Type hints are only ever recorded (and read back) in typed mode.
+            types: if typed {
+                Vec::with_capacity(len)
+            } else {
+                Vec::new()
+            },
+            schemas: Vec::with_capacity(len),
+        })
+    }
+
+    /// Write `{name@binding,...}` for the captured fields.
+    fn write_schema(&self, out: &mut Vec<u8>, typed: bool) {
+        out.push(b'{');
+        for (i, f) in self.fields.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            push_schema_field_name(out, f);
+            // Nested schema takes priority over type hint
+            if let Some(Some(schema)) = self.schemas.get(i) {
+                out.push(b'@');
+                out.extend_from_slice(schema);
+            } else if typed && let Some(type_hint) = self.types.get(i).and_then(|t| *t) {
+                out.push(b'@');
+                out.extend_from_slice(type_hint.as_bytes());
+            }
+        }
+        out.push(b'}');
+    }
 }
 
 impl StructEncoder {
@@ -1013,13 +1055,11 @@ impl StructEncoder {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
-        if !self.skip_schema {
+        if let Some(cap) = &mut self.capture {
             // Capture field names + per-field hint state only when this struct
             // will actually emit a schema header / fragment.
-            self.fields.push(key);
-            if enc.typed {
-                enc.current_type_hint = None;
-            }
+            cap.fields.push(key);
+            enc.current_type_hint = None;
             enc.nested_schema = None;
         }
 
@@ -1031,18 +1071,18 @@ impl StructEncoder {
         enc.in_tuple = true;
         value.encode(&mut *enc)?;
 
-        if !self.skip_schema {
-            self.field_schemas.push(enc.nested_schema.take());
+        if let Some(cap) = &mut self.capture {
+            cap.schemas.push(enc.nested_schema.take());
             if enc.typed {
-                self.field_types.push(enc.current_type_hint.take());
+                cap.types.push(enc.current_type_hint.take());
             }
         } else {
             // Discard transient state nested serializers may have set; we are
-            // not using it.
-            enc.nested_schema = None;
-            if enc.typed {
-                enc.current_type_hint = None;
+            // not using it. Checked first so the common case drops nothing.
+            if enc.nested_schema.is_some() {
+                enc.nested_schema = None;
             }
+            enc.current_type_hint = None;
         }
         Ok(())
     }
@@ -1065,73 +1105,42 @@ impl StructEncoder {
             enc.clear_value_hint();
             return Ok(());
         }
-        if self.is_top {
-            enc.buf.push(b')');
-            // Build the top-level header once, then slide the tuple payload
-            // aside to make room for it.
-            let mut out = Vec::with_capacity(self.fields.len() * 16 + 4);
-            out.push(b'{');
-            for (i, f) in self.fields.iter().enumerate() {
-                if i > 0 {
-                    out.push(b',');
-                }
-                push_schema_field_name(&mut out, f);
-                // Nested schema takes priority over type hint
-                if let Some(Some(schema)) = self.field_schemas.get(i) {
-                    out.push(b'@');
-                    out.extend_from_slice(schema);
-                } else if enc.typed
-                    && let Some(type_hint) = self.field_types.get(i).and_then(|t| *t)
-                {
-                    out.push(b'@');
-                    out.extend_from_slice(type_hint.as_bytes());
-                }
-            }
-            out.extend_from_slice(b"}:");
-            prepend(&mut enc.buf, &out);
-        } else if self.skip_schema {
+        enc.buf.push(b')');
+        let Some(cap) = self.capture else {
             // Homogeneous Vec<Struct> non-first row: only the data tuple was
             // emitted. No header bubble-up to do.
-            enc.buf.push(b')');
             enc.first = false;
+            enc.current_type_hint = None;
+            return Ok(());
+        };
+        if self.is_top {
+            // Build the top-level header once, then slide the tuple payload
+            // aside to make room for it.
+            let mut out = Vec::with_capacity(cap.fields.len() * 16 + 4);
+            cap.write_schema(&mut out, enc.typed);
+            out.push(b':');
+            prepend(&mut enc.buf, &out);
+            return Ok(());
+        }
+        enc.first = false;
+        if self.capture_for_seq {
+            let Capture {
+                fields,
+                types,
+                schemas,
+            } = *cap;
+            enc.top_seq_fields = Some(fields);
+            enc.top_seq_field_schemas = Some(schemas);
             if enc.typed {
-                enc.current_type_hint = None;
+                enc.top_seq_field_types = Some(types);
             }
         } else {
-            enc.buf.push(b')');
-            enc.first = false;
-            if self.capture_for_seq {
-                enc.top_seq_fields = Some(self.fields);
-                enc.top_seq_field_schemas = Some(self.field_schemas);
-                if enc.typed {
-                    enc.top_seq_field_types = Some(self.field_types);
-                }
-            } else {
-                // Build schema fragment for parent to consume
-                let mut schema = Vec::with_capacity(64);
-                schema.push(b'{');
-                for (i, f) in self.fields.iter().enumerate() {
-                    if i > 0 {
-                        schema.push(b',');
-                    }
-                    push_schema_field_name(&mut schema, f);
-                    if let Some(Some(nested)) = self.field_schemas.get(i) {
-                        schema.push(b'@');
-                        schema.extend_from_slice(nested);
-                    } else if enc.typed
-                        && let Some(type_hint) = self.field_types.get(i).and_then(|t| *t)
-                    {
-                        schema.push(b'@');
-                        schema.extend_from_slice(type_hint.as_bytes());
-                    }
-                }
-                schema.push(b'}');
-                enc.nested_schema = Some(schema);
-            }
-            if enc.typed {
-                enc.current_type_hint = None;
-            }
+            // Build schema fragment for parent to consume
+            let mut schema = Vec::with_capacity(64);
+            cap.write_schema(&mut schema, enc.typed);
+            enc.nested_schema = Some(schema);
         }
+        enc.current_type_hint = None;
         Ok(())
     }
 }

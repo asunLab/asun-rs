@@ -19,9 +19,9 @@ use crate::traits::AsunDecode;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::Arc;
+use std::rc::Rc;
 
-type CachedSchema = Arc<Schema>;
+type CachedSchema = Rc<Schema>;
 
 /// Maximum structural nesting the decoder will follow before bailing out.
 ///
@@ -97,14 +97,6 @@ thread_local! {
         RefCell::new(HashMap::default());
 }
 
-#[derive(Hash, PartialEq, Eq, Clone, Copy)]
-struct StructModeCacheKey {
-    source_ptr: usize,
-    source_len: usize,
-    target_ptr: usize,
-    target_len: usize,
-}
-
 /// The decode plan a derived struct impl must follow, chosen by
 /// [`Decoder::begin_struct_decode`].
 ///
@@ -141,31 +133,10 @@ pub struct Decoder<'de> {
     pending: Option<&'de Ty>,
     /// Structural nesting depth, checked against [`MAX_DEPTH`].
     depth: u32,
-    /// Tiny MRU cache of resolved field alignments. For deep nested structs
-    /// (e.g. `Company > Division > Team > Project > Task`) several struct
-    /// types interleave during a single decode; a 1-slot cache thrashes and
-    /// every miss falls back to the `HashMap`. `MRU_SLOTS` is sized to
-    /// comfortably cover realistic nesting depths.
-    ///
-    /// Entries are `Copy`, so an MRU hit costs a few integer compares — no
-    /// refcount traffic, which used to dominate this path.
-    last_struct_mode: [Option<CachedStructMode>; MRU_SLOTS],
-    /// Index of the most recently filled MRU slot — checked first.
-    last_struct_mode_head: usize,
-    /// Per-decode cache for repeated nested struct/source-schema alignments.
-    ///
-    /// Deliberately *not* process-global: the key contains raw pointers into
-    /// schema and target-field slices, which are only guaranteed stable for the
-    /// lifetime of one decode (the arenas below pin them). A global cache would
-    /// hand a recycled address the previous occupant's plan.
-    struct_mode_cache_local: HashMap<StructModeCacheKey, StructPlan, FxBuild>,
     /// Strong references to every schema this decode touched. Keeps the names
     /// alive for the whole decode so [`SchemaFields`] can be a plain `Copy`
     /// borrow instead of a refcounted handle.
     schema_arena: Vec<CachedSchema>,
-    /// Backing store for `StructPlan::ByName` missing-field lists, referenced
-    /// by index so plans stay `Copy`.
-    missing_arena: Vec<Box<[&'static str]>>,
     /// When > 0, every scalar `decode_*` returns a type default instead of
     /// reading the input. This is the direct analog of the previous
     /// `DefaultValueDeserializer`: it lets a derived struct impl produce a
@@ -175,11 +146,12 @@ pub struct Decoder<'de> {
     /// and enum payloads. Each frame knows its closer and how many slots it
     /// has read, so commas and the closer are checked exactly.
     seq_frames: Vec<SeqFrame>,
-
-    // --- Per-struct decode state (used by the begin_struct_decode seam) ---
-    /// Stack of in-progress struct frames. Each `begin_struct_decode` pushes
-    /// one; `end_struct_decode` pops it. Nesting depth mirrors data nesting.
+    /// Open structs, innermost last (see [`StructFrame`]). Not pushed in
+    /// default mode, where no input is read.
     struct_frames: Vec<StructFrame<'de>>,
+    /// Cursors of the open ByName-mode structs, innermost last. Exact-mode
+    /// structs — the common case — never touch it.
+    byname_frames: Vec<ByNameCursor<'de>>,
 }
 
 /// One open positional group (see [`Decoder::seq_frames`]).
@@ -192,27 +164,28 @@ struct SeqFrame {
     index: u32,
 }
 
-/// State for one struct currently being decoded via the derive seam.
+/// One struct being decoded through the derive seam. Pushed by
+/// `begin_struct_decode`, popped by `end_struct_decode`; kept to two words plus
+/// a flag so the push/pop per nested struct stays cheap.
 struct StructFrame<'de> {
     /// The schema in effect for the parent context, restored on
     /// `end_struct_decode`.
     parent_schema: Option<SchemaFields<'de>>,
-
-    // ByName-mode cursors.
-    /// Number of source fields already consumed via `next_struct_key`.
-    byname_source_index: usize,
-    /// Whether we are still in the "read source fields" phase (vs. the
-    /// "emit missing defaults" phase).
-    byname_in_defaults: bool,
-    byname_default_index: usize,
-    /// Index into [`Decoder::missing_arena`], or `NO_MISSING` for Exact mode.
-    byname_missing: u32,
+    /// This struct also has a [`ByNameCursor`] on [`Decoder::byname_frames`].
+    byname: bool,
 }
 
-/// Sentinel for "this frame has no missing-field list".
-const NO_MISSING: u32 = u32::MAX;
-
-const MRU_SLOTS: usize = 8;
+/// Cursor of a struct decoded in ByName mode.
+struct ByNameCursor<'de> {
+    /// Number of source fields already consumed via `next_struct_key`.
+    source_index: u32,
+    /// Number of missing-target defaults already emitted.
+    default_index: u32,
+    /// Still reading source fields (vs. emitting missing-target defaults).
+    in_defaults: bool,
+    /// Target fields absent from the source schema.
+    missing: &'de [&'static str],
+}
 
 /// Decode one ASUN document into `T`.
 ///
@@ -248,14 +221,11 @@ impl<'de> Decoder<'de> {
             vec_schema_active: false,
             pending: None,
             depth: 0,
-            last_struct_mode: [const { None }; MRU_SLOTS],
-            last_struct_mode_head: 0,
-            struct_mode_cache_local: HashMap::default(),
             schema_arena: Vec::new(),
-            missing_arena: Vec::new(),
             default_depth: 0,
             seq_frames: Vec::new(),
             struct_frames: Vec::new(),
+            byname_frames: Vec::new(),
         }
     }
 
@@ -276,11 +246,11 @@ impl<'de> Decoder<'de> {
     /// Pin `schema` for the rest of this decode and hand back a `'de` borrow.
     ///
     /// The arena holds a strong reference until the `Decoder` is dropped, and
-    /// the `Schema` behind an `Arc` never moves, so the borrow (and borrows of
+    /// the `Schema` behind an `Rc` never moves, so the borrow (and borrows of
     /// any nested schema it owns) outlives every use the decoder makes of it.
     #[inline]
     fn intern_schema(&mut self, schema: CachedSchema) -> &'de Schema {
-        let ptr: *const Schema = Arc::as_ptr(&schema);
+        let ptr: *const Schema = Rc::as_ptr(&schema);
         self.schema_arena.push(schema);
         unsafe { &*ptr }
     }
@@ -439,6 +409,14 @@ impl<'de> Decoder<'de> {
         Err(Error::Eof)
     }
 
+    /// The byte at the cursor is `b`. Written out instead of
+    /// `input.get(pos) == Some(&b)`, which does not always fold to a plain
+    /// compare.
+    #[inline(always)]
+    fn peek_is(&self, b: u8) -> bool {
+        self.pos < self.input.len() && self.input[self.pos] == b
+    }
+
     #[inline(always)]
     fn peek_byte(&self) -> Result<u8> {
         if self.pos < self.input.len() {
@@ -540,7 +518,7 @@ impl<'de> Decoder<'de> {
     // -----------------------------------------------------------------------
 
     /// Parse the `{...}` schema at the cursor, through the per-thread cache.
-    fn parse_schema(&mut self) -> Result<SchemaFields<'de>> {
+    fn parse_schema(&mut self) -> Result<&'de Schema> {
         let open_pos = self.pos;
         if self.peek_byte()? != b'{' {
             return Err(Error::ExpectedOpenBrace);
@@ -552,10 +530,10 @@ impl<'de> Decoder<'de> {
 
         if let Some(schema) = SCHEMA_CACHE.with(|c| c.borrow().get(schema_key).cloned()) {
             self.pos = schema_end + 1;
-            return Ok(SchemaFields::Cached(self.intern_schema(schema)));
+            return Ok(self.intern_schema(schema));
         }
 
-        let schema: CachedSchema = Arc::new(self.parse_schema_body()?);
+        let schema: CachedSchema = Rc::new(self.parse_schema_body()?);
         debug_assert_eq!(self.pos, schema_end + 1);
         SCHEMA_CACHE.with(|c| {
             let mut c = c.borrow_mut();
@@ -567,7 +545,7 @@ impl<'de> Decoder<'de> {
             }
             c.insert(schema_key.into(), schema.clone());
         });
-        Ok(SchemaFields::Cached(self.intern_schema(schema)))
+        Ok(self.intern_schema(schema))
     }
 
     /// Parse `{ field, field, ... }` (GRAMMAR.abnf `schema`) into a tree.
@@ -622,7 +600,7 @@ impl<'de> Decoder<'de> {
                 }
             };
             self.skip_layout();
-            let ty = if self.input.get(self.pos) == Some(&b'@') {
+            let ty = if self.peek_is(b'@') {
                 self.pos += 1;
                 self.skip_layout();
                 self.parse_binding()?
@@ -672,13 +650,13 @@ impl<'de> Decoder<'de> {
             Some(b'[') => {
                 self.pos += 1;
                 self.skip_layout();
-                if self.input.get(self.pos) == Some(&b']') {
+                if self.peek_is(b']') {
                     self.pos += 1;
                     return Ok(Ty::Arr(Box::new(Ty::Any)));
                 }
                 let inner = self.parse_binding()?;
                 self.skip_layout();
-                if self.input.get(self.pos) != Some(&b']') {
+                if !self.peek_is(b']') {
                     return Err(Error::msg("expected ']' in array type annotation"));
                 }
                 self.pos += 1;
@@ -921,7 +899,7 @@ impl<'de> Decoder<'de> {
             return Err(Error::HintMismatch);
         }
         self.skip_layout();
-        if self.input.get(self.pos) == Some(&b'"') {
+        if self.peek_is(b'"') {
             return self.parse_quoted_string_cow();
         }
         let (v, has_escape) = self.parse_plain_value_meta()?;
@@ -931,7 +909,7 @@ impl<'de> Decoder<'de> {
         if has_escape {
             return Ok(CowStr::Owned(unescape_plain(v)?));
         }
-        if v == "null" {
+        if v.len() == 4 && v.as_bytes() == b"null" {
             return Err(Error::NullNotAllowed);
         }
         Ok(CowStr::Borrowed(v))
@@ -950,33 +928,51 @@ impl<'de> Decoder<'de> {
         }
     }
 
-    /// Parse number directly without intermediate string::parse for integers.
-    /// Optimized loop with minimal branching.
-    #[inline]
-    fn parse_i64(&mut self) -> Result<i64> {
-        let negative = self.pos < self.input.len() && self.input[self.pos] == b'-';
-        if negative {
-            self.pos += 1;
-        }
+    /// Scan an unsigned decimal digit run at the cursor and return its value.
+    ///
+    /// Up to 18 digits cannot overflow a `u64`, so the loop runs with plain
+    /// wrapping arithmetic and only longer runs are re-checked. The digit run
+    /// must end at a token boundary (`42abc` is not a number).
+    #[inline(always)]
+    fn scan_digits(&mut self) -> Result<u64> {
+        let start = self.pos;
         let mut val: u64 = 0;
-        let mut digits = 0u32;
         while self.pos < self.input.len() {
             let d = self.input[self.pos].wrapping_sub(b'0');
             if d > 9 {
                 break;
             }
-            // Detect overflow instead of silently wrapping; an out-of-range
-            // integer is a decode error, not corrupt data.
-            val = val
-                .checked_mul(10)
-                .and_then(|v| v.checked_add(d as u64))
-                .ok_or(Error::IntegerOutOfRange)?;
+            val = val.wrapping_mul(10).wrapping_add(d as u64);
             self.pos += 1;
-            digits += 1;
         }
+        let digits = self.pos - start;
         if digits == 0 || !self.is_token_end_at(self.pos) {
             return Err(Error::InvalidNumber);
         }
+        if digits > 18 {
+            return self.checked_digits(start);
+        }
+        Ok(val)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn checked_digits(&self, start: usize) -> Result<u64> {
+        self.input[start..self.pos].iter().try_fold(0u64, |v, &b| {
+            v.checked_mul(10)
+                .and_then(|v| v.checked_add((b - b'0') as u64))
+                .ok_or(Error::IntegerOutOfRange)
+        })
+    }
+
+    /// Parse a signed integer literal (`-?[0-9]+`).
+    #[inline]
+    fn parse_i64(&mut self) -> Result<i64> {
+        let negative = self.peek_is(b'-');
+        if negative {
+            self.pos += 1;
+        }
+        let val = self.scan_digits()?;
         if negative {
             // Magnitude fits in i64 (>= -2^63) exactly when val <= 2^63.
             if val > (i64::MAX as u64) + 1 {
@@ -991,33 +987,15 @@ impl<'de> Decoder<'de> {
         }
     }
 
-    /// Parse u64 directly. Optimized loop with wrapping_sub for digit check.
+    /// Parse an unsigned integer literal; `-0` is 0, any other negative value
+    /// is out of range.
     #[inline]
     fn parse_u64(&mut self) -> Result<u64> {
-        let negative = self.input.get(self.pos) == Some(&b'-');
-        let start = self.pos;
+        let negative = self.peek_is(b'-');
         if negative {
             self.pos += 1;
         }
-        let mut val: u64 = 0;
-        let mut digits = 0u32;
-        while self.pos < self.input.len() {
-            let d = self.input[self.pos].wrapping_sub(b'0');
-            if d > 9 {
-                break;
-            }
-            val = val
-                .checked_mul(10)
-                .and_then(|v| v.checked_add(d as u64))
-                .ok_or(Error::IntegerOutOfRange)?;
-            self.pos += 1;
-            digits += 1;
-        }
-        if digits == 0 || !self.is_token_end_at(self.pos) {
-            self.pos = start;
-            return Err(Error::InvalidNumber);
-        }
-        // `-0` is the integer 0; any other negative value does not fit.
+        let val = self.scan_digits()?;
         if negative && val != 0 {
             return Err(Error::IntegerOutOfRange);
         }
@@ -1032,47 +1010,68 @@ impl<'de> Decoder<'de> {
     /// fraction or exponent is a hint mismatch. Overflow to infinity is an
     /// error (SPEC S4).
     #[inline]
-    fn parse_f64_direct(&mut self, int_only: bool) -> Result<f64> {
+    fn parse_float<F: FloatTarget>(&mut self, int_only: bool) -> Result<F> {
         let start = self.pos;
-        if self.pos < self.input.len() && self.input[self.pos] == b'-' {
+        let negative = self.peek_is(b'-');
+        if negative {
             self.pos += 1;
         }
+        // Validate the literal and, in the same pass, collect its decimal
+        // mantissa and exponent for the exact fast path below.
+        let mut mantissa: u64 = 0;
+        let mut digits: u32 = 0;
         let int_start = self.pos;
-        while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+        while self.pos < self.input.len() {
+            let d = self.input[self.pos].wrapping_sub(b'0');
+            if d > 9 {
+                break;
+            }
+            mantissa = mantissa.wrapping_mul(10).wrapping_add(d as u64);
+            digits += 1;
             self.pos += 1;
         }
         if self.pos == int_start {
             return Err(Error::InvalidNumber);
         }
         let mut had_dot_or_exp = false;
-        if self.pos < self.input.len() && self.input[self.pos] == b'.' {
+        let mut exp10: i64 = 0;
+        if self.peek_is(b'.') {
             had_dot_or_exp = true;
             self.pos += 1;
             let frac_start = self.pos;
-            while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+            while self.pos < self.input.len() {
+                let d = self.input[self.pos].wrapping_sub(b'0');
+                if d > 9 {
+                    break;
+                }
+                mantissa = mantissa.wrapping_mul(10).wrapping_add(d as u64);
+                digits += 1;
                 self.pos += 1;
             }
             if self.pos == frac_start {
                 return Err(Error::InvalidNumber);
             }
+            exp10 = -((self.pos - frac_start) as i64);
         }
-        if self.pos < self.input.len()
-            && (self.input[self.pos] == b'e' || self.input[self.pos] == b'E')
-        {
+        if self.peek_is(b'e') || self.peek_is(b'E') {
             had_dot_or_exp = true;
             self.pos += 1;
-            if self.pos < self.input.len()
-                && (self.input[self.pos] == b'+' || self.input[self.pos] == b'-')
-            {
+            let exp_negative = self.peek_is(b'-');
+            if exp_negative || self.peek_is(b'+') {
                 self.pos += 1;
             }
             let exp_start = self.pos;
+            let mut e: i64 = 0;
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+                // Saturate: anything this large is far outside f64 range and
+                // goes to the slow path anyway.
+                e = (e * 10 + (self.input[self.pos] - b'0') as i64).min(1 << 32);
                 self.pos += 1;
             }
             if self.pos == exp_start {
                 return Err(Error::InvalidNumber);
             }
+            exp10 += if exp_negative { -e } else { e };
         }
         if !self.is_token_end_at(self.pos) {
             return Err(Error::InvalidNumber);
@@ -1080,8 +1079,14 @@ impl<'de> Decoder<'de> {
         if int_only && had_dot_or_exp {
             return Err(Error::HintMismatch);
         }
-        let v: f64 =
-            fast_float2::parse(&self.input[start..self.pos]).map_err(|_| Error::InvalidNumber)?;
+        // Clinger's fast path: when the mantissa and 10^k are both exact in
+        // the target type, one multiply or divide gives the correctly rounded
+        // result. Parsing directly in the target type (rather than f64 then
+        // narrowing) also avoids double rounding for f32.
+        if digits <= F::EXACT_DIGITS && exp10.unsigned_abs() <= F::EXACT_POW10 {
+            return Ok(F::fast(mantissa, exp10, negative));
+        }
+        let v = F::parse_slow(&self.input[start..self.pos]).ok_or(Error::InvalidNumber)?;
         if v.is_infinite() {
             return Err(Error::FloatOverflow);
         }
@@ -1097,63 +1102,6 @@ impl<'de> Decoder<'de> {
             Some(Ty::Int) => Ok(true),
             Some(_) => Err(Error::HintMismatch),
         }
-    }
-
-    #[inline(always)]
-    fn struct_plan_uncached(&mut self, target_fields: &'static [&'static str]) -> StructPlan {
-        let Some(source_fields) = self.schema_fields else {
-            return StructPlan::Exact;
-        };
-        if source_fields.matches_exact(target_fields) {
-            StructPlan::Exact
-        } else {
-            let missing = source_fields.missing_target_fields(target_fields);
-            let idx = self.missing_arena.len() as u32;
-            self.missing_arena.push(missing);
-            StructPlan::ByName(idx)
-        }
-    }
-
-    #[inline]
-    fn struct_plan(&mut self, target_fields: &'static [&'static str]) -> StructPlan {
-        let Some(source_fields) = self.schema_fields else {
-            return StructPlan::Exact;
-        };
-        let source_key = source_fields.cache_key();
-        let cache_key = StructModeCacheKey {
-            source_ptr: source_key.ptr,
-            source_len: source_key.len,
-            target_ptr: target_fields.as_ptr() as usize,
-            target_len: target_fields.len(),
-        };
-
-        // MRU fast path: linear-search a small fixed-size array. Skips the
-        // `HashMap::get` when the same handful of struct shapes alternate
-        // (typical in deeply nested data, e.g.
-        // Company > Division > Team > Project > Task on every row).
-        for slot in self.last_struct_mode.iter().flatten() {
-            if slot.cache_key == cache_key {
-                return slot.plan;
-            }
-        }
-
-        let plan = match self.struct_mode_cache_local.get(&cache_key) {
-            Some(&plan) => plan,
-            None => {
-                let plan = self.struct_plan_uncached(target_fields);
-                self.struct_mode_cache_local.insert(cache_key, plan);
-                plan
-            }
-        };
-        self.mru_put(cache_key, plan);
-        plan
-    }
-
-    #[inline]
-    fn mru_put(&mut self, cache_key: StructModeCacheKey, plan: StructPlan) {
-        let slot = self.last_struct_mode_head;
-        self.last_struct_mode[slot] = Some(CachedStructMode { cache_key, plan });
-        self.last_struct_mode_head = (slot + 1) % MRU_SLOTS;
     }
 
     // =======================================================================
@@ -1272,12 +1220,7 @@ impl<'de> Decoder<'de> {
         if self.default_depth > 0 {
             return Ok(0.0);
         }
-        let v = self.decode_f64_inner()?;
-        let narrow = v as f32;
-        if narrow.is_infinite() {
-            return Err(Error::FloatOverflow);
-        }
-        Ok(narrow)
+        self.decode_float()
     }
 
     #[inline]
@@ -1285,15 +1228,15 @@ impl<'de> Decoder<'de> {
         if self.default_depth > 0 {
             return Ok(0.0);
         }
-        self.decode_f64_inner()
+        self.decode_float()
     }
 
     #[inline]
-    fn decode_f64_inner(&mut self) -> Result<f64> {
+    fn decode_float<F: FloatTarget>(&mut self) -> Result<F> {
         let int_only = self.take_float_hint()?;
         self.skip_layout();
         let start = self.pos;
-        self.parse_f64_direct(int_only).map_err(|e| {
+        self.parse_float::<F>(int_only).map_err(|e| {
             self.pos = start;
             self.scalar_error(e)
         })
@@ -1371,10 +1314,10 @@ impl<'de> Decoder<'de> {
             self.pos += 4;
             return Ok(());
         }
-        if self.input.get(self.pos) == Some(&b'(') {
+        if self.peek_is(b'(') {
             self.pos += 1;
             self.skip_layout();
-            if self.input.get(self.pos) == Some(&b')') {
+            if self.peek_is(b')') {
                 self.pos += 1;
                 return Ok(());
             }
@@ -1402,7 +1345,7 @@ impl<'de> Decoder<'de> {
         let save = self.pos;
         self.pos += 1;
         self.skip_layout();
-        let r = self.input.get(self.pos) == Some(&b'{');
+        let r = self.peek_is(b'{');
         self.pos = save;
         r
     }
@@ -1410,7 +1353,7 @@ impl<'de> Decoder<'de> {
     fn decode_vec_inner<T: AsunDecode<'de>>(&mut self) -> Result<Vec<T>> {
         let pending = self.pending.take();
         self.skip_layout();
-        if self.input.get(self.pos) != Some(&b'[') {
+        if !self.peek_is(b'[') {
             return Err(self.scalar_error(Error::ExpectedOpenBracket));
         }
         if self.depth == 1 && pending.is_none() && self.header_follows() {
@@ -1424,13 +1367,17 @@ impl<'de> Decoder<'de> {
         self.pos += 1;
         let mut out = Vec::new();
         self.skip_layout();
-        if self.input.get(self.pos) == Some(&b']') {
+        if self.peek_is(b']') {
             self.pos += 1;
             return Ok(out);
         }
         loop {
             self.pending = elem;
             out.push(T::decode(self)?);
+            if self.peek_is(b',') {
+                self.pos += 1;
+                continue;
+            }
             self.skip_layout();
             match self.input.get(self.pos) {
                 Some(b',') => self.pos += 1,
@@ -1451,32 +1398,44 @@ impl<'de> Decoder<'de> {
         self.skip_layout();
         let fields = self.parse_schema()?;
         self.skip_layout();
-        if self.input.get(self.pos) != Some(&b']') {
+        if !self.peek_is(b']') {
             return Err(Error::ExpectedCloseBracket);
         }
         self.pos += 1;
         self.skip_layout();
-        if self.input.get(self.pos) != Some(&b':') {
+        if !self.peek_is(b':') {
             return Err(Error::ExpectedColon);
         }
         self.pos += 1;
 
         let mut out = Vec::new();
         self.skip_layout();
-        if self.input.get(self.pos) == Some(&b'(') {
+        if self.peek_is(b'(') {
+            let rows_start = self.pos;
             loop {
-                self.schema_fields = Some(fields);
+                self.schema_fields = Some(SchemaFields::Cached(fields));
                 self.vec_schema_active = true;
                 out.push(T::decode(self)?);
                 self.vec_schema_active = false;
-                self.skip_layout();
-                if self.input.get(self.pos) != Some(&b',') {
-                    break;
+                if out.len() == 1 {
+                    // Size the vector from the first row instead of doubling
+                    // through ~log2(n) reallocations of the whole array.
+                    let row = self.pos - rows_start + 1;
+                    let rest = self.input.len() - self.pos;
+                    out.reserve(cautious_capacity::<T>(rest / row));
+                }
+                if !self.peek_is(b',') {
+                    self.skip_layout();
+                    if !self.peek_is(b',') {
+                        break;
+                    }
                 }
                 self.pos += 1;
-                self.skip_layout();
-                if self.input.get(self.pos) != Some(&b'(') {
-                    return Err(self.unexpected());
+                if !self.peek_is(b'(') {
+                    self.skip_layout();
+                    if !self.peek_is(b'(') {
+                        return Err(self.unexpected());
+                    }
                 }
             }
         }
@@ -1528,7 +1487,7 @@ impl<'de> Decoder<'de> {
         } else if closer == b']' {
             // `[]` is an array with zero slots, not one null slot.
             self.skip_layout();
-            if self.input.get(self.pos) == Some(&b']') {
+            if self.peek_is(b']') {
                 return Err(Error::FieldCountMismatch {
                     expected: 1,
                     got: 0,
@@ -1572,78 +1531,92 @@ impl<'de> Decoder<'de> {
     /// Begin decoding a struct with the given target field list.
     ///
     /// Parses/consumes any schema header and the opening `(`, sets up schema
-    /// alignment, and returns the [`StructDecodeMode`] the derive should follow.
-    /// Must be paired with [`Decoder::end_struct_decode`].
+    /// alignment, and returns the [`StructDecodeMode`] the derive should
+    /// follow. Must be paired with [`Decoder::end_struct_decode`].
+    #[inline]
     pub fn begin_struct_decode(
         &mut self,
         target_fields: &'static [&'static str],
     ) -> Result<StructDecodeMode> {
         if self.default_depth > 0 {
-            // Missing struct field: every leaf recurses in default mode. We
-            // still push a frame so end_struct_decode stays balanced, but it
-            // performs no input reads.
-            self.struct_frames.push(StructFrame {
-                parent_schema: None,
-                byname_source_index: 0,
-                byname_in_defaults: false,
-                byname_default_index: 0,
-                byname_missing: NO_MISSING,
-            });
+            // Missing struct field: every leaf recurses in default mode and
+            // no input is read. `end_struct_decode` skips its pop likewise.
             return Ok(StructDecodeMode::Exact);
         }
+        let parent_schema = self.schema_fields;
 
         let pending = self.pending.take();
         self.enter()?;
-        self.skip_layout();
-
-        let parent_schema = self.schema_fields;
-        match self.input.get(self.pos) {
+        if !self.peek_is(b'(') {
+            self.skip_layout();
+        }
+        let source = match self.input.get(self.pos) {
             Some(b'(') if self.vec_schema_active => {
                 // A row of `[{schema}]:` — the header is the source schema.
                 self.pos += 1;
                 self.vec_schema_active = false;
+                match self.schema_fields {
+                    Some(SchemaFields::Cached(schema)) => schema,
+                    _ => unreachable!("row schema is always parsed"),
+                }
             }
             Some(b'(') => {
                 // Nested object data: names come from the parent's `@{...}`
                 // binding when there is one, else from the target, by position.
                 self.pos += 1;
-                self.schema_fields = Some(match pending {
-                    None => SchemaFields::Static(target_fields),
-                    Some(Ty::Obj(schema)) => SchemaFields::Cached(schema),
+                match pending {
+                    None => {
+                        self.schema_fields = Some(SchemaFields::Static(target_fields));
+                        // Source names are the target names: always Exact.
+                        self.struct_frames.push(StructFrame {
+                            parent_schema,
+                            byname: false,
+                        });
+                        return Ok(StructDecodeMode::Exact);
+                    }
+                    Some(Ty::Obj(schema)) => {
+                        self.schema_fields = Some(SchemaFields::Cached(schema));
+                        schema
+                    }
                     Some(_) => return Err(Error::HintMismatch),
-                });
+                }
             }
             Some(b'{') if self.depth == 1 => {
                 // Top-level `{schema}:(...)`.
                 let parsed = self.parse_schema()?;
                 self.skip_layout();
-                if self.input.get(self.pos) != Some(&b':') {
+                if !self.peek_is(b':') {
                     return Err(Error::ExpectedColon);
                 }
                 self.pos += 1;
                 self.skip_layout();
-                if self.input.get(self.pos) != Some(&b'(') {
+                if !self.peek_is(b'(') {
                     return Err(Error::ExpectedOpenParen);
                 }
                 self.pos += 1;
-                self.schema_fields = Some(parsed);
+                self.schema_fields = Some(SchemaFields::Cached(parsed));
+                parsed
             }
             _ => return Err(self.scalar_error(Error::ExpectedOpenParen)),
-        }
-
-        let (decode_mode, byname_missing) = match self.struct_plan(target_fields) {
-            StructPlan::Exact => (StructDecodeMode::Exact, NO_MISSING),
-            StructPlan::ByName(idx) => (StructDecodeMode::ByName, idx),
         };
 
+        let missing = source.plan_for(target_fields);
         self.struct_frames.push(StructFrame {
             parent_schema,
-            byname_source_index: 0,
-            byname_in_defaults: false,
-            byname_default_index: 0,
-            byname_missing,
+            byname: missing.is_some(),
         });
-        Ok(decode_mode)
+        match missing {
+            None => Ok(StructDecodeMode::Exact),
+            Some(missing) => {
+                self.byname_frames.push(ByNameCursor {
+                    source_index: 0,
+                    default_index: 0,
+                    in_defaults: false,
+                    missing,
+                });
+                Ok(StructDecodeMode::ByName)
+            }
+        }
     }
 
     /// Number of slots the current struct's source tuple must have.
@@ -1659,10 +1632,14 @@ impl<'de> Decoder<'de> {
             return T::decode(self);
         }
         // Hot path: the derive calls this once per field with `index` =
-        // 0,1,2,… so commas are driven off `index` alone and the frame stack
-        // is never touched here.
+        // 0,1,2,… so commas are driven off `index` alone, and the previous
+        // value almost always left the cursor right on the comma.
         if index > 0 {
-            self.expect_slot_comma(b')', self.source_len(), index)?;
+            if self.peek_is(b',') {
+                self.pos += 1;
+            } else {
+                self.expect_slot_comma(b')', self.source_len(), index)?;
+            }
         }
         self.pending = match self.schema_fields {
             Some(fields) => fields.ty_at(index),
@@ -1675,41 +1652,30 @@ impl<'de> Decoder<'de> {
     /// source tuple is exhausted. After the source is drained, this emits the
     /// names of missing target fields (whose values decode as defaults).
     pub fn next_struct_key(&mut self) -> Result<Option<&'de str>> {
-        let frame_idx = self.struct_frames.len() - 1;
-        if self.struct_frames[frame_idx].byname_in_defaults {
-            return self.next_missing_default_key(frame_idx);
-        }
-        let Some(fields) = self.schema_fields else {
+        let schema_fields = self.schema_fields;
+        let Some(state) = self.byname_frames.last_mut() else {
             return Ok(None);
         };
-        let source_index = self.struct_frames[frame_idx].byname_source_index;
-        if source_index >= fields.len() {
-            return self.next_missing_default_key(frame_idx);
+        if !state.in_defaults {
+            let Some(fields) = schema_fields else {
+                return Ok(None);
+            };
+            let source_index = state.source_index as usize;
+            if source_index < fields.len() {
+                state.source_index += 1;
+                if source_index > 0 {
+                    self.expect_slot_comma(b')', fields.len(), source_index)?;
+                }
+                self.pending = fields.ty_at(source_index);
+                return Ok(Some(fields.name_at(source_index)));
+            }
+            state.in_defaults = true;
         }
-        if source_index > 0 {
-            self.expect_slot_comma(b')', fields.len(), source_index)?;
-        }
-        self.struct_frames[frame_idx].byname_source_index += 1;
-        self.pending = fields.ty_at(source_index);
-        Ok(Some(fields.name_at(source_index)))
-    }
-
-    #[inline]
-    fn next_missing_default_key(&mut self, frame_idx: usize) -> Result<Option<&'de str>> {
-        let frame = &mut self.struct_frames[frame_idx];
-        frame.byname_in_defaults = true;
-        if frame.byname_missing == NO_MISSING {
+        let k = state.default_index as usize;
+        let Some(&name) = state.missing.get(k) else {
             return Ok(None);
-        }
-        let idx = frame.byname_missing as usize;
-        let k = frame.byname_default_index;
-        let missing = &self.missing_arena[idx];
-        if k >= missing.len() {
-            return Ok(None);
-        }
-        // Elements are `&'static str`, so this is a copy, not a lifetime cast.
-        let name: &'static str = missing[k];
-        self.struct_frames[frame_idx].byname_default_index += 1;
+        };
+        state.default_index += 1;
         Ok(Some(name))
     }
 
@@ -1717,8 +1683,7 @@ impl<'de> Decoder<'de> {
     /// `next_struct_key`.
     #[inline]
     pub fn struct_field_value<T: AsunDecode<'de>>(&mut self) -> Result<T> {
-        let frame_idx = self.struct_frames.len() - 1;
-        if self.struct_frames[frame_idx].byname_in_defaults {
+        if self.in_byname_defaults() {
             return self.decode_default::<T>();
         }
         T::decode(self)
@@ -1727,13 +1692,19 @@ impl<'de> Decoder<'de> {
     /// ByName mode: skip the value for an unmatched source key.
     #[inline]
     pub fn skip_struct_value(&mut self) -> Result<()> {
-        let frame_idx = self.struct_frames.len() - 1;
-        if self.struct_frames[frame_idx].byname_in_defaults {
+        if self.in_byname_defaults() {
             // A missing-target default key: nothing in the input to skip.
             return Ok(());
         }
         self.pending = None;
         self.skip_value()
+    }
+
+    /// The innermost ByName struct has drained its source and is emitting
+    /// missing-target defaults.
+    #[inline(always)]
+    fn in_byname_defaults(&self) -> bool {
+        self.byname_frames.last().is_some_and(|c| c.in_defaults)
     }
 
     /// ByName mode: produce a type default for an unmatched target field.
@@ -1744,20 +1715,22 @@ impl<'de> Decoder<'de> {
 
     /// Finish decoding a struct: the tuple must close right after its last
     /// slot (SPEC S1), then the parent schema state is restored.
+    #[inline]
     pub fn end_struct_decode(&mut self) -> Result<()> {
+        if self.default_depth > 0 {
+            return Ok(());
+        }
         let frame = self
             .struct_frames
             .pop()
             .expect("end_struct_decode without begin_struct_decode");
-
-        if self.default_depth > 0 {
-            return Ok(());
+        if frame.byname {
+            self.byname_frames.pop();
         }
-
         self.leave();
-        // Exact mode with a full field match leaves the cursor right on the
-        // closing paren, which is the overwhelmingly common case.
-        if self.input.get(self.pos) == Some(&b')') {
+        // The last field normally leaves the cursor right on the closing
+        // paren, which is the overwhelmingly common case.
+        if self.peek_is(b')') {
             self.pos += 1;
         } else {
             let n = self.source_len();
@@ -1876,6 +1849,20 @@ impl Ty {
 pub(crate) struct Schema {
     names: Box<[Box<str>]>,
     types: Box<[Ty]>,
+    /// Decode plans of this schema against each target struct seen so far.
+    /// The schema lives in the per-thread cache across decodes and the key is
+    /// a `&'static` field list, so a plan is computed once per (schema, target
+    /// type) for the life of the thread.
+    plans: RefCell<Vec<Plan>>,
+}
+
+/// How a source schema lines up with one target field list.
+struct Plan {
+    target_ptr: usize,
+    target_len: usize,
+    /// `None`: names match 1:1 in order (Exact). `Some`: by-name mapping, with
+    /// the target fields the source lacks.
+    missing: Option<Box<[&'static str]>>,
 }
 
 impl Schema {
@@ -1883,7 +1870,49 @@ impl Schema {
         Schema {
             names: names.into_boxed_slice(),
             types: types.into_boxed_slice(),
+            plans: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Plan for decoding this schema into `target`: `None` for Exact, else the
+    /// target fields absent from the source (ByName).
+    #[inline]
+    fn plan_for(&self, target: &'static [&'static str]) -> Option<&[&'static str]> {
+        let (ptr, len) = (target.as_ptr() as usize, target.len());
+        let hit = self
+            .plans
+            .borrow()
+            .iter()
+            .find(|p| p.target_ptr == ptr && p.target_len == len)
+            .map(|p| p.missing.as_deref().map(|m| m as *const [&'static str]));
+        let missing = match hit {
+            Some(missing) => missing,
+            None => self.compute_plan(target),
+        };
+        // SAFETY: plans are only ever appended, and each list is a separate
+        // boxed slice, so it stays put for as long as `self` lives.
+        missing.map(|m| unsafe { &*m })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn compute_plan(&self, target: &'static [&'static str]) -> Option<*const [&'static str]> {
+        let exact = self.names.len() == target.len()
+            && self.names.iter().zip(target).all(|(a, b)| **a == **b);
+        let missing: Option<Box<[&'static str]>> = (!exact).then(|| {
+            target
+                .iter()
+                .copied()
+                .filter(|t| !self.names.iter().any(|n| **n == **t))
+                .collect()
+        });
+        let ptr = missing.as_deref().map(|m| m as *const [&'static str]);
+        self.plans.borrow_mut().push(Plan {
+            target_ptr: target.as_ptr() as usize,
+            target_len: target.len(),
+            missing,
+        });
+        ptr
     }
 }
 
@@ -1892,18 +1921,6 @@ enum SchemaFields<'de> {
     /// Borrowed from a schema pinned in [`Decoder::schema_arena`].
     Cached(&'de Schema),
     Static(&'static [&'static str]),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SchemaFieldsKey {
-    ptr: usize,
-    len: usize,
-}
-
-#[derive(Clone, Copy)]
-struct CachedStructMode {
-    cache_key: StructModeCacheKey,
-    plan: StructPlan,
 }
 
 impl<'de> SchemaFields<'de> {
@@ -1931,58 +1948,78 @@ impl<'de> SchemaFields<'de> {
             Self::Static(_) => None,
         }
     }
+}
 
+/// A float type the decoder can produce directly (no f64 → f32 narrowing).
+trait FloatTarget: Copy {
+    /// Mantissas with at most this many digits are exact.
+    const EXACT_DIGITS: u32;
+    /// `10^k` is exact for `k` up to this.
+    const EXACT_POW10: u64;
+    /// `±mantissa × 10^exp10` within the exact ranges above.
+    fn fast(mantissa: u64, exp10: i64, negative: bool) -> Self;
+    fn parse_slow(text: &[u8]) -> Option<Self>;
+    fn is_infinite(self) -> bool;
+}
+
+impl FloatTarget for f64 {
+    const EXACT_DIGITS: u32 = 15;
+    const EXACT_POW10: u64 = 22;
     #[inline(always)]
-    fn cache_key(&self) -> SchemaFieldsKey {
-        match self {
-            Self::Cached(schema) => SchemaFieldsKey {
-                ptr: schema.names.as_ptr() as usize,
-                len: schema.names.len(),
-            },
-            Self::Static(fields) => SchemaFieldsKey {
-                ptr: fields.as_ptr() as usize,
-                len: fields.len(),
-            },
-        }
+    fn fast(mantissa: u64, exp10: i64, negative: bool) -> f64 {
+        const POW10: [f64; 23] = [
+            1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+            1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+        ];
+        let m = mantissa as f64;
+        let v = if exp10 < 0 {
+            m / POW10[(-exp10) as usize]
+        } else {
+            m * POW10[exp10 as usize]
+        };
+        if negative { -v } else { v }
     }
-
     #[inline]
-    fn matches_exact(&self, target_fields: &'static [&'static str]) -> bool {
-        if self.len() != target_fields.len() {
-            return false;
-        }
-        target_fields
-            .iter()
-            .enumerate()
-            .all(|(idx, target)| self.name_at(idx) == *target)
+    fn parse_slow(text: &[u8]) -> Option<f64> {
+        fast_float2::parse(text).ok()
     }
-
-    #[inline]
-    fn contains_name(&self, target: &str) -> bool {
-        match self {
-            Self::Cached(schema) => schema.names.iter().any(|n| &**n == target),
-            Self::Static(fields) => fields.contains(&target),
-        }
-    }
-
-    #[inline]
-    fn missing_target_fields(&self, target_fields: &'static [&'static str]) -> Box<[&'static str]> {
-        target_fields
-            .iter()
-            .copied()
-            .filter(|target| !self.contains_name(target))
-            .collect()
+    #[inline(always)]
+    fn is_infinite(self) -> bool {
+        f64::is_infinite(self)
     }
 }
 
-/// How a struct row lines up with the source schema. `Copy` on purpose: it is
-/// looked up once per struct value, and the previous refcounted representation
-/// cost an atomic increment/decrement pair on every single row.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StructPlan {
-    Exact,
-    /// Index into [`Decoder::missing_arena`].
-    ByName(u32),
+impl FloatTarget for f32 {
+    const EXACT_DIGITS: u32 = 7;
+    const EXACT_POW10: u64 = 10;
+    #[inline(always)]
+    fn fast(mantissa: u64, exp10: i64, negative: bool) -> f32 {
+        const POW10: [f32; 11] = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10];
+        let m = mantissa as f32;
+        let v = if exp10 < 0 {
+            m / POW10[(-exp10) as usize]
+        } else {
+            m * POW10[exp10 as usize]
+        };
+        if negative { -v } else { v }
+    }
+    #[inline]
+    fn parse_slow(text: &[u8]) -> Option<f32> {
+        fast_float2::parse(text).ok()
+    }
+    #[inline(always)]
+    fn is_infinite(self) -> bool {
+        f32::is_infinite(self)
+    }
+}
+
+/// Capacity worth reserving up front for an estimated `n` elements: the
+/// estimate comes from untrusted input, so the reservation is capped at 1 MiB
+/// (beyond that the vector grows normally as elements actually arrive).
+#[inline]
+pub(crate) fn cautious_capacity<T>(n: usize) -> usize {
+    const MAX_PREALLOC_BYTES: usize = 1024 * 1024;
+    n.min(MAX_PREALLOC_BYTES / core::mem::size_of::<T>().max(1))
 }
 
 /// Lightweight Cow-like enum to avoid std::borrow::Cow overhead

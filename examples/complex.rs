@@ -1,3 +1,6 @@
+// Sample floats such as 3.14 are test data, not stand-ins for math constants.
+#![allow(clippy::approx_constant)]
+
 use asun::{AsunDecode, AsunEncode, decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
 

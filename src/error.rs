@@ -41,7 +41,8 @@ pub enum Error {
     /// A binary tag was not one of the values defined by the wire format.
     InvalidTag,
     InvalidUtf8,
-    /// A LEB128 value uses more than 64 bits or an invalid tenth byte.
+    /// A LEB128 value uses more than 64 bits, or is padded with redundant
+    /// bytes (each value has exactly one valid encoding).
     VarintOverflow,
     /// An attacker-controlled sequence length exceeded the configured limit.
     SequenceTooLong,
@@ -110,7 +111,7 @@ impl fmt::Display for Error {
             Error::InvalidBool => write!(f, "invalid bool"),
             Error::InvalidTag => write!(f, "invalid binary tag"),
             Error::InvalidUtf8 => write!(f, "invalid utf-8"),
-            Error::VarintOverflow => write!(f, "varint overflow"),
+            Error::VarintOverflow => write!(f, "malformed or overflowing varint"),
             Error::SequenceTooLong => write!(f, "sequence exceeds decode limit"),
             Error::AllocationFailed => write!(f, "allocation failed"),
             Error::UnclosedString => write!(f, "unclosed string"),

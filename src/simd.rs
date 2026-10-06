@@ -805,9 +805,124 @@ pub fn simd_bulk_extend(dst: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
+/// Copy `n` bytes from `src` to `dst` with word moves instead of a `memcpy`
+/// call; `n` must be below 64.
+///
+/// # Safety
+/// `src[..n]` must be readable, `dst[..n]` writable, and the ranges must not
+/// overlap.
+#[inline(always)]
+pub(crate) unsafe fn copy_small(src: *const u8, dst: *mut u8, n: usize) {
+    unsafe {
+        if n > 16 {
+            core::ptr::copy_nonoverlapping(src, dst, n);
+        } else if n >= 8 {
+            let head = (src as *const u64).read_unaligned();
+            let tail = (src.add(n - 8) as *const u64).read_unaligned();
+            (dst as *mut u64).write_unaligned(head);
+            (dst.add(n - 8) as *mut u64).write_unaligned(tail);
+        } else if n >= 4 {
+            let head = (src as *const u32).read_unaligned();
+            let tail = (src.add(n - 4) as *const u32).read_unaligned();
+            (dst as *mut u32).write_unaligned(head);
+            (dst.add(n - 4) as *mut u32).write_unaligned(tail);
+        } else {
+            for i in 0..n {
+                *dst.add(i) = *src.add(i);
+            }
+        }
+    }
+}
+
+/// `bytes` is shorter than 64 bytes and pure ASCII. Longer slices return
+/// `false` and are left to `str::from_utf8`, which is fast on long input.
+#[inline(always)]
+pub(crate) fn is_short_ascii(bytes: &[u8]) -> bool {
+    let n = bytes.len();
+    let p = bytes.as_ptr();
+    // SAFETY: every read below stays within `bytes[..n]`.
+    unsafe {
+        if n >= 64 {
+            false
+        } else if n >= 8 {
+            // Whole words, plus one final word overlapping the previous one.
+            let mut acc = (p.add(n - 8) as *const u64).read_unaligned();
+            let mut i = 0;
+            while i + 8 <= n {
+                acc |= (p.add(i) as *const u64).read_unaligned();
+                i += 8;
+            }
+            acc & 0x8080_8080_8080_8080 == 0
+        } else if n >= 4 {
+            let a = (p as *const u32).read_unaligned();
+            let b = (p.add(n - 4) as *const u32).read_unaligned();
+            (a | b) & 0x8080_8080 == 0
+        } else {
+            let mut acc = 0u8;
+            for i in 0..n {
+                acc |= *p.add(i);
+            }
+            acc < 0x80
+        }
+    }
+}
+
+/// Append `src` to `buf`. Field values are mostly a few bytes long, where a
+/// call into `memcpy` costs more than the copy; up to 16 bytes this is done
+/// with two overlapping word moves instead.
+#[inline(always)]
+pub(crate) fn push_bytes(buf: &mut Vec<u8>, src: &[u8]) {
+    let n = src.len();
+    if n > 16 {
+        buf.extend_from_slice(src);
+        return;
+    }
+    buf.reserve(n);
+    // SAFETY: `reserve` guarantees `n` writable bytes past `len`; every read
+    // and write below stays within `src[..n]` / `dst[..n]`.
+    unsafe {
+        let len = buf.len();
+        copy_small(src.as_ptr(), buf.as_mut_ptr().add(len), n);
+        buf.set_len(len + n);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_small_and_push_bytes_all_lengths() {
+        let src: Vec<u8> = (0u8..64)
+            .map(|b| b.wrapping_mul(7).wrapping_add(1))
+            .collect();
+        for n in 0..64 {
+            let mut dst = vec![0xAAu8; 70];
+            unsafe { copy_small(src.as_ptr(), dst.as_mut_ptr().add(3), n) };
+            assert_eq!(&dst[3..3 + n], &src[..n], "copy_small n={n}");
+            assert!(
+                dst[..3].iter().chain(&dst[3 + n..]).all(|&b| b == 0xAA),
+                "copy_small wrote outside n={n}"
+            );
+
+            let mut buf = b"xy".to_vec();
+            push_bytes(&mut buf, &src[..n]);
+            assert_eq!(&buf[2..], &src[..n], "push_bytes n={n}");
+        }
+    }
+
+    #[test]
+    fn is_short_ascii_matches_definition() {
+        for n in 0..=70usize {
+            let ascii = vec![b'a'; n];
+            assert_eq!(is_short_ascii(&ascii), n < 64, "ascii n={n}");
+            for pos in 0..n {
+                let mut v = ascii.clone();
+                v[pos] = 0x80;
+                assert!(!is_short_ascii(&v), "high byte at {pos} of {n}");
+            }
+        }
+    }
 
     #[test]
     fn test_simd_has_special_chars() {

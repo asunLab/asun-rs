@@ -5,13 +5,15 @@
 //! strings/bytes are length-prefixed. The implementation uses a pointer cursor
 //! for one bounds check per primitive and validates malformed integer encodings.
 
+use crate::decode::{MAX_DEPTH, cautious_capacity};
 use crate::error::{Error, Result};
 use crate::simd;
 use crate::traits::{AsunDecodeBinary, AsunEncodeBinary};
 use core::marker::PhantomData;
 use core::{mem, ptr, slice};
 
-/// Default guard for attacker-controlled sequence lengths.
+/// Default guard for attacker-controlled sequence lengths. It also caps the
+/// total number of zero-sized elements (`Vec<()>` and the like) in one input.
 ///
 /// Applications with a different protocol limit can construct a
 /// [`BinaryDecoder`] with [`BinaryDecoder::with_max_sequence_len`].
@@ -129,15 +131,41 @@ impl BinaryEncoder {
         self.buf.is_empty()
     }
 
+    /// Make room for `n` more bytes. The check is inlined; growing is not.
+    #[inline(always)]
+    fn ensure(&mut self, n: usize) {
+        if self.buf.capacity() - self.buf.len() < n {
+            self.grow(n);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, n: usize) {
+        self.buf.reserve(n);
+    }
+
+    /// Append fixed-size raw bytes.
+    #[inline(always)]
+    fn put<const N: usize>(&mut self, bytes: [u8; N]) {
+        self.ensure(N);
+        // SAFETY: `ensure` guarantees `N` writable bytes past `len`.
+        unsafe {
+            let len = self.buf.len();
+            (self.buf.as_mut_ptr().add(len) as *mut [u8; N]).write_unaligned(bytes);
+            self.buf.set_len(len + N);
+        }
+    }
+
     #[inline(always)]
     pub fn write_bool(&mut self, v: bool) -> Result<()> {
-        self.buf.push(v as u8);
+        self.put([v as u8]);
         Ok(())
     }
 
     #[inline(always)]
     pub fn write_u8(&mut self, v: u8) -> Result<()> {
-        self.buf.push(v);
+        self.put([v]);
         Ok(())
     }
 
@@ -146,7 +174,7 @@ impl BinaryEncoder {
     #[inline(always)]
     fn write_uvarint(&mut self, mut v: u64) {
         if v < 0x80 {
-            self.buf.push(v as u8);
+            self.put([v as u8]);
             return;
         }
 
@@ -172,7 +200,7 @@ impl BinaryEncoder {
 
     #[inline(always)]
     pub fn write_i8(&mut self, v: i8) -> Result<()> {
-        self.buf.push(v as u8);
+        self.put([v as u8]);
         Ok(())
     }
 
@@ -214,13 +242,13 @@ impl BinaryEncoder {
 
     #[inline(always)]
     pub fn write_f32(&mut self, v: f32) -> Result<()> {
-        self.buf.extend_from_slice(&v.to_bits().to_le_bytes());
+        self.put(v.to_bits().to_le_bytes());
         Ok(())
     }
 
     #[inline(always)]
     pub fn write_f64(&mut self, v: f64) -> Result<()> {
-        self.buf.extend_from_slice(&v.to_bits().to_le_bytes());
+        self.put(v.to_bits().to_le_bytes());
         Ok(())
     }
 
@@ -230,22 +258,38 @@ impl BinaryEncoder {
         Ok(())
     }
 
-    #[inline]
-    fn write_bytes_raw(&mut self, data: &[u8]) {
-        simd::simd_bulk_extend(&mut self.buf, data);
+    /// Length prefix + payload with a single capacity check. Strings are the
+    /// bulk of most payloads and are usually short, so the prefix is written
+    /// inline and short payloads are copied without a `memcpy` call.
+    #[inline(always)]
+    fn write_len_prefixed(&mut self, data: &[u8]) {
+        let n = data.len();
+        if n >= 64 {
+            self.write_uvarint(n as u64);
+            simd::simd_bulk_extend(&mut self.buf, data);
+            return;
+        }
+        // n < 64: the prefix is a single LEB128 byte.
+        self.ensure(n + 1);
+        // SAFETY: `ensure` guarantees `n + 1` writable bytes past `len`.
+        unsafe {
+            let len = self.buf.len();
+            let dst = self.buf.as_mut_ptr().add(len);
+            dst.write(n as u8);
+            simd::copy_small(data.as_ptr(), dst.add(1), n);
+            self.buf.set_len(len + n + 1);
+        }
     }
 
     #[inline]
     pub fn write_str(&mut self, s: &str) -> Result<()> {
-        self.write_uvarint(s.len() as u64);
-        self.write_bytes_raw(s.as_bytes());
+        self.write_len_prefixed(s.as_bytes());
         Ok(())
     }
 
     #[inline]
     pub fn write_bytes(&mut self, data: &[u8]) -> Result<()> {
-        self.write_uvarint(data.len() as u64);
-        self.write_bytes_raw(data);
+        self.write_len_prefixed(data);
         Ok(())
     }
 
@@ -274,6 +318,12 @@ pub struct BinaryDecoder<'de> {
     ptr: *const u8,
     remaining: usize,
     max_sequence_len: usize,
+    /// Elements of zero-sized types still allowed. They consume no input, so
+    /// nested sequences of them could otherwise multiply a few count bytes
+    /// into unbounded work.
+    zst_budget: usize,
+    /// Current sequence nesting depth, checked against [`MAX_DEPTH`].
+    depth: u32,
     _marker: PhantomData<&'de [u8]>,
 }
 
@@ -288,12 +338,16 @@ impl<'de> BinaryDecoder<'de> {
         Self::with_max_sequence_len(data, DEFAULT_MAX_SEQUENCE_LEN)
     }
 
+    /// Decoder with a custom limit on sequence lengths; see
+    /// [`DEFAULT_MAX_SEQUENCE_LEN`].
     #[inline]
     pub fn with_max_sequence_len(data: &'de [u8], max_sequence_len: usize) -> Self {
         Self {
             ptr: data.as_ptr(),
             remaining: data.len(),
             max_sequence_len,
+            zst_budget: max_sequence_len,
+            depth: 0,
             _marker: PhantomData,
         }
     }
@@ -341,8 +395,9 @@ impl<'de> BinaryDecoder<'de> {
         Ok(value)
     }
 
-    /// Strict unsigned LEB128 decoder. The tenth byte of a `u64` may contain
-    /// only one payload bit, so values greater than `1` are rejected.
+    /// Strict unsigned LEB128 decoder. Every value has exactly one encoding:
+    /// the last byte of a multi-byte varint must be non-zero (no padding), and
+    /// the tenth byte of a `u64` holds a single payload bit, so it must be `1`.
     #[inline(always)]
     fn read_uvarint(&mut self) -> Result<u64> {
         let remaining = self.remaining();
@@ -365,7 +420,7 @@ impl<'de> BinaryDecoder<'de> {
             while i < available {
                 let byte = *start.add(i);
                 if i == 9 {
-                    if byte > 1 {
+                    if byte != 1 {
                         return Err(Error::VarintOverflow);
                     }
                     value |= (byte as u64) << 63;
@@ -376,6 +431,9 @@ impl<'de> BinaryDecoder<'de> {
 
                 value |= ((byte & 0x7f) as u64) << (i * 7);
                 if byte < 0x80 {
+                    if byte == 0 {
+                        return Err(Error::VarintOverflow);
+                    }
                     self.ptr = start.add(i + 1);
                     self.remaining -= i + 1;
                     return Ok(value);
@@ -479,12 +537,29 @@ impl<'de> BinaryDecoder<'de> {
     #[inline]
     pub fn read_str_zerocopy(&mut self) -> Result<&'de str> {
         let bytes = self.read_bytes_zerocopy()?;
+        // Short ASCII strings dominate real payloads; `from_utf8`'s setup
+        // costs more than validating them word-wise here.
+        if simd::is_short_ascii(bytes) {
+            // SAFETY: ASCII is valid UTF-8.
+            return Ok(unsafe { core::str::from_utf8_unchecked(bytes) });
+        }
         core::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)
     }
 
     #[inline]
     pub fn read_string(&mut self) -> Result<String> {
-        Ok(self.read_str_zerocopy()?.to_owned())
+        let s = self.read_str_zerocopy()?;
+        if s.len() >= 64 {
+            return Ok(s.to_owned());
+        }
+        let mut v = Vec::with_capacity(s.len());
+        // SAFETY: capacity is `s.len()` and the ranges are distinct
+        // allocations; the bytes are a copy of a `&str`, hence valid UTF-8.
+        unsafe {
+            simd::copy_small(s.as_ptr(), v.as_mut_ptr(), s.len());
+            v.set_len(s.len());
+            Ok(String::from_utf8_unchecked(v))
+        }
     }
 
     /// Read raw bytes without allocating.
@@ -501,20 +576,40 @@ impl<'de> BinaryDecoder<'de> {
             return Err(Error::SequenceTooLong);
         }
 
+        if mem::size_of::<T>() == 0 {
+            self.zst_budget = self
+                .zst_budget
+                .checked_sub(count)
+                .ok_or(Error::SequenceTooLong)?;
+        }
+        // Recursive types (`struct Node { kids: Vec<Node> }`) nest through
+        // here, so this is where untrusted input could exhaust the stack.
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::DepthLimitExceeded);
+        }
+
         let mut out = Vec::new();
         // Do not preallocate solely from an untrusted count. Ordinary wire
-        // elements consume at least one byte, so `remaining` is a useful upper
-        // bound for the common case. ZSTs allocate nothing.
+        // elements consume at least one byte, so `remaining` bounds the count,
+        // and the reservation is capped in bytes. ZSTs allocate nothing.
         let initial = if mem::size_of::<T>() == 0 {
             0
         } else {
-            count.min(self.remaining())
+            cautious_capacity::<T>(count.min(self.remaining()))
         };
         out.try_reserve_exact(initial)
             .map_err(|_| Error::AllocationFailed)?;
+        self.depth += 1;
         for _ in 0..count {
-            out.push(T::decode_binary(self)?);
+            match T::decode_binary(self) {
+                Ok(v) => out.push(v),
+                Err(e) => {
+                    self.depth -= 1;
+                    return Err(e);
+                }
+            }
         }
+        self.depth -= 1;
         Ok(out)
     }
 
@@ -525,8 +620,8 @@ impl<'de> BinaryDecoder<'de> {
 }
 
 const _: () = {
-    // Pointer + remaining length + one sequence limit. PhantomData is zero-sized.
-    assert!(mem::size_of::<BinaryDecoder<'static>>() == 3 * mem::size_of::<usize>());
+    // Pointer, remaining length, sequence limit, ZST budget and depth.
+    assert!(mem::size_of::<BinaryDecoder<'static>>() <= 5 * mem::size_of::<usize>());
 };
 
 #[cfg(test)]
@@ -595,7 +690,7 @@ mod tests {
             u32v: u32::MAX,
             u64v: u64::MAX,
             f32v: 3.15,
-            f64v: 2.718281828,
+            f64v: 2.5e-308,
         };
         let bytes = encode_binary(&v).unwrap();
         let v2: AllPrims = decode_binary(&bytes).unwrap();
@@ -712,6 +807,37 @@ mod tests {
     }
 
     #[test]
+    fn strings_roundtrip_and_reject_bad_utf8_at_every_length() {
+        for n in 0..80usize {
+            let ascii: String = (0..n).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+            let multi: String = ascii
+                .chars()
+                .map(|c| if c == 'c' { 'é' } else { c })
+                .collect();
+            for s in [&ascii, &multi] {
+                let bytes = encode_binary(s).unwrap();
+                assert_eq!(&decode_binary_exact::<String>(&bytes).unwrap(), s);
+            }
+            for pos in 0..n {
+                // A lone continuation byte / truncated sequence anywhere is rejected.
+                for bad in [0x80u8, 0xC3, 0xFF] {
+                    let mut raw = ascii.clone().into_bytes();
+                    raw[pos] = bad;
+                    let mut enc = BinaryEncoder::new();
+                    enc.write_bytes(&raw).unwrap();
+                    assert!(
+                        matches!(
+                            decode_binary::<String>(enc.as_bytes()),
+                            Err(Error::InvalidUtf8)
+                        ),
+                        "n={n} pos={pos} byte={bad:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn exact_decode_rejects_trailing_bytes() {
         assert!(matches!(
             decode_binary_exact::<u8>(&[1, 2]),
@@ -727,5 +853,4 @@ mod tests {
         assert_eq!(out.capacity(), cap);
         assert_eq!(decode_binary_exact::<u64>(&out).unwrap(), 123);
     }
-
 }

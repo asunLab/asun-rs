@@ -902,6 +902,14 @@ fn encode_roundtrip() {
         b: long.clone(),
         c: Some((None, long.clone())),
     }]);
+    // Field names outside bare-name must be quoted in every header form.
+    let odd = Odd {
+        a_b: 1,
+        sp: "x".into(),
+    };
+    r.roundtrip(odd.clone());
+    r.roundtrip(vec![odd.clone(), odd.clone()]);
+    r.roundtrip(Lead2 { inner: vec![odd] });
     // Tuple / enum fields: heterogeneous, so no scalar binding may leak.
     r.roundtrip(vec![
         Ev::Unit,
@@ -932,4 +940,17 @@ enum Ev {
     Tup(i64, String),
     Rec { k: i64 },
     Empty {},
+}
+
+#[derive(Debug, PartialEq, Clone, AsunEncode, AsunDecode)]
+struct Odd {
+    #[asun(rename = "a-b")]
+    a_b: i64,
+    #[asun(rename = "s p")]
+    sp: String,
+}
+
+#[derive(Debug, PartialEq, Clone, AsunEncode, AsunDecode)]
+struct Lead2 {
+    inner: Vec<Odd>,
 }

@@ -52,7 +52,7 @@ ASUN declares the schema **once** and streams data as compact tuples:
 
 ```toml
 [dependencies]
-asun = "1.2"
+asun = "1.3"
 ```
 
 No `serde` in your dependency tree — ASUN ships its own derive macros. If you
@@ -141,8 +141,9 @@ enum Event {
     Score(u32),
 }
 
-let text = encode(&Event::Login { user: "Alice".into() })?;
+let text = encode(&Event::Login { user: "Alice".into() })?;   // "[Login,Alice]"
 let back: Event = decode(&text)?;
+// Event::Ping -> "Ping", Event::Score(3) -> "[Score,3]"
 ```
 
 ### 5. Pretty text: `encode_pretty` / `encode_pretty_typed`
@@ -204,6 +205,42 @@ fn load(text: &str) -> asun::Result<Vec<User>> {
     Ok(users)
 }
 ```
+
+## Text Format Notes
+
+The text codec follows the ASUN 1.5 grammar
+([`GRAMMAR.abnf`](https://github.com/asunLab/asun/blob/main/conformance/GRAMMAR.abnf)).
+The rules you are most likely to notice:
+
+- **Minimal quoting.** Plain strings may contain spaces, `@`, `:`, `/` and `*`:
+  `(hello world,alice@example.com,12:30)`. A string is quoted only when it
+  contains `, ( ) [ ] { } " \`, a control character or `/*`, has leading or
+  trailing spaces, or would read back as another value (`"true"`, `"null"`,
+  `"42"`).
+- **Null.** `None` is an empty slot: `(Alice,)`. The keyword `null` means the
+  same thing and is what a top-level `None` (`null`) and a one-element
+  `vec![None]` (`[null]`) are written as.
+- **Commas are separators.** `n` commas always delimit `n + 1` slots, so
+  `(a,)` is `a` plus a null. A comma after the last row of `[{...}]:` is an
+  error.
+- **Tuples and enums are arrays.** `(3, 4)` and tuple structs encode as `[3,4]`;
+  a unit variant is its bare name (`Ping`), any other variant is
+  `[Variant,...]`.
+- **Comments.** `/* ... */` is allowed anywhere whitespace is.
+- **Field names** outside `[A-Za-z0-9_]` are quoted in the schema:
+  `{"a-b",name}`.
+
+Decoding is strict, so malformed or mismatched input is an error instead of a
+silent misread:
+
+- A tuple must have exactly as many slots as its schema.
+- Scalar hints (`@int`, `@float`, `@bool`, `@str`) are enforced.
+- Integers must fit the target type and floats must not overflow.
+- Inside quoted strings, raw control characters, unknown escapes and lone
+  surrogates are rejected.
+- Duplicate field names and trailing content are rejected.
+- Schema evolution still works: fields missing from the source decode to their
+  default, and extra source fields are skipped.
 
 ## API Reference
 
@@ -283,12 +320,12 @@ Run the benchmark example with:
 cargo run --example bench --release
 ```
 
-The Rust benchmark now uses the same two-line summary style as the Go example:
+Sample output (Apple Silicon laptop; absolute numbers vary by machine):
 
 ```text
 Flat struct × 1000 (8 fields, vec)
-  Serialize:   JSON   411.05ms /   121675 B | ASUN   175.25ms (2.3x) /    56718 B (46.6%) | BIN    41.32ms (9.9x) /    74454 B (61.2%)
-  Deserialize: JSON   287.06ms | ASUN   195.57ms (1.5x) | BIN    64.62ms (4.4x)
+    Encode:      JSON 28.64ms/121675B | ASUN 13.17ms(2.2x)/56718B(46.6%) | BIN 5.58ms(5.1x)/49413B(40.6%)
+    Decode:      JSON    42.82ms | ASUN    22.28ms (1.9x) | BIN    12.19ms (3.5x)
 ```
 
 `ASUN` / `BIN` ratios are measured against JSON, and size percentages show the remaining size relative to JSON.

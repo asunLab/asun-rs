@@ -15,7 +15,7 @@
 use crate::binary::{BinaryDecoder, BinaryEncoder};
 use crate::decode::Decoder;
 use crate::encode::Encoder;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// A value that can be encoded to the asun text format.
 ///
@@ -337,11 +337,10 @@ impl<'de> AsunDecodeBinary<'de> for &'de str {
 impl<'de, T: AsunDecodeBinary<'de>> AsunDecodeBinary<'de> for Option<T> {
     #[inline]
     fn decode_binary(dec: &mut BinaryDecoder<'de>) -> Result<Self> {
-        let tag = dec.read_u8()?;
-        if tag == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(T::decode_binary(dec)?))
+        match dec.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(T::decode_binary(dec)?)),
+            _ => Err(Error::InvalidTag),
         }
     }
 }

@@ -3,10 +3,10 @@
 //! `#[asun(default = "path")]` value source.
 //!
 //! Two wire formats with different skip semantics are exercised:
-//!   - text   : self-describing (schema carries field names) — a skipped field
-//!              can simply be omitted on encode; decode fills the default.
-//!   - binary : no schema, fixed field order — any skip MUST be symmetric
-//!              (encode omits ⇒ decode omits), or field alignment breaks.
+//!   - text: self-describing (schema carries field names) — a skipped field
+//!     can simply be omitted on encode; decode fills the default.
+//!   - binary: no schema, fixed field order — any skip MUST be symmetric
+//!     (encode omits ⇒ decode omits), or field alignment breaks.
 //!   - skip_serializing_if is text-only: binary always writes the field.
 
 use asun::{AsunDecode, AsunEncode};

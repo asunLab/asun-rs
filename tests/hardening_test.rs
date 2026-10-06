@@ -443,3 +443,19 @@ fn concurrent_decodes_are_independent() {
         h.join().unwrap();
     }
 }
+
+/// f32 used to be parsed as f64 and then narrowed, which rounds twice: this
+/// literal is just below the midpoint of two f32 values, but its nearest f64
+/// is the midpoint itself, which then rounds (to even) the wrong way.
+#[test]
+fn f32_is_rounded_once() {
+    #[derive(Debug, AsunDecode, PartialEq)]
+    struct F32 {
+        v: f32,
+    }
+    let lit = "1.00000017881393432617187499";
+    let want: f32 = lit.parse().unwrap();
+    assert_eq!(want, 1.0 + f32::EPSILON);
+    let got = decode::<F32>(&format!("{{v}}:({lit})")).unwrap().v;
+    assert_eq!(got.to_bits(), want.to_bits());
+}

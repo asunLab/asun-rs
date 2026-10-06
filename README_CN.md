@@ -46,7 +46,7 @@ ASUN 只声明 **一次** Schema，数据以紧凑元组方式流式传输：
 
 ```toml
 [dependencies]
-asun = "1.2"
+asun = "1.3"
 ```
 
 依赖树中**不会引入 serde**，ASUN 自带 derive 宏。如果你的项目别处已经用了 serde，两者互不影响、互不交互。
@@ -123,8 +123,9 @@ enum Event {
     Score(u32),
 }
 
-let text = encode(&Event::Login { user: "Alice".into() })?;
+let text = encode(&Event::Login { user: "Alice".into() })?;   // "[Login,Alice]"
 let back: Event = decode(&text)?;
+// Event::Ping -> "Ping"，Event::Score(3) -> "[Score,3]"
 ```
 
 ### 5. Pretty 文本：`encode_pretty` / `encode_pretty_typed`
@@ -177,6 +178,30 @@ fn load(text: &str) -> asun::Result<Vec<User>> {
     Ok(users)
 }
 ```
+
+## 文本格式要点
+
+文本编解码遵循 ASUN 1.5 语法（[`GRAMMAR.abnf`](https://github.com/asunLab/asun/blob/main/conformance/GRAMMAR.abnf)）。最容易注意到的规则：
+
+- **最少引号**：普通字符串可以直接包含空格、`@`、`:`、`/`、`*`，例如 `(hello world,alice@example.com,12:30)`。以下情况才会加引号：
+  - 含有 `, ( ) [ ] { } " \`、控制字符或 `/*`；
+  - 首尾有空格；
+  - 读回来会变成别的值（`"true"`、`"null"`、`"42"`）。
+- **null**：`None` 写成空槽，如 `(Alice,)`。关键字 `null` 含义相同：顶层的 `None` 写成 `null`，只有一个元素的 `vec![None]` 写成 `[null]`。
+- **逗号是纯分隔符**：`n` 个逗号总是分出 `n + 1` 个槽，所以 `(a,)` 是 `a` 加一个 null。`[{...}]:` 最后一行后面再跟逗号是错误。
+- **元组和枚举写成数组**：`(3, 4)` 和元组结构体写成 `[3,4]`。单元变体写成名字本身（`Ping`），其余变体写成 `[变体名,...]`。
+- **注释**：凡是能写空白的地方都可以写 `/* ... */`。
+- **字段名**：不在 `[A-Za-z0-9_]` 范围内的字段名在 schema 中加引号，如 `{"a-b",name}`。
+
+解码是严格的，格式错误或对不上的输入会直接报错，而不是悄悄读错：
+
+- 槽数必须和 schema 一致；
+- `@int`、`@float`、`@bool`、`@str` 提示会被检查；
+- 整数必须放得进目标类型，浮点数不能溢出；
+- 引号字符串里的裸控制字符、未知转义、孤立代理都会报错；
+- 重复字段名、文档末尾多余内容也会报错。
+
+schema 演进照常可用：源数据里缺的字段取默认值，多出来的字段会被跳过。
 
 ## API 参考
 
@@ -249,12 +274,12 @@ cargo run --example bench
 cargo run --example bench --release
 ```
 
-Rust 版 benchmark 现在和 Go 版保持同一种两行汇总样式：
+示例输出（Apple Silicon 笔记本；绝对数值随机器而变）：
 
 ```text
 Flat struct × 1000 (8 fields, vec)
-  Serialize:   JSON   411.05ms /   121675 B | ASUN   175.25ms (2.3x) /    56718 B (46.6%) | BIN    41.32ms (9.9x) /    74454 B (61.2%)
-  Deserialize: JSON   287.06ms | ASUN   195.57ms (1.5x) | BIN    64.62ms (4.4x)
+    Encode:      JSON 28.64ms/121675B | ASUN 13.17ms(2.2x)/56718B(46.6%) | BIN 5.58ms(5.1x)/49413B(40.6%)
+    Decode:      JSON    42.82ms | ASUN    22.28ms (1.9x) | BIN    12.19ms (3.5x)
 ```
 
 其中 `ASUN` / `BIN` 后面的倍率都是相对 JSON 计算的，大小百分比表示“占 JSON 的剩余比例”。

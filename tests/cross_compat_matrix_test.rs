@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_names)]
+
 use asun::AsunDecode;
 use asun::decode;
 
