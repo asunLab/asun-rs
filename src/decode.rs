@@ -282,12 +282,34 @@ impl<'de> Decoder<'de> {
         matches!(self.input.get(self.pos), None | Some(b',' | b')' | b']'))
     }
 
-    /// The cursor is at the keyword `null`.
+    /// The cursor is at the keyword `null`. Only layout may follow it in the
+    /// slot: `null x` is the plain string "null x" (S2).
     #[inline(always)]
     fn at_null_keyword(&self) -> bool {
         self.input.len() >= self.pos + 4
             && &self.input[self.pos..self.pos + 4] == b"null"
             && self.is_token_end_at(self.pos + 4)
+            && self.slot_ends_after_layout(self.pos + 4)
+    }
+
+    /// True when only layout separates `pos` from the end of the slot.
+    #[inline]
+    fn slot_ends_after_layout(&self, mut pos: usize) -> bool {
+        let input = self.input;
+        loop {
+            match input.get(pos) {
+                None | Some(b',' | b')' | b']') => return true,
+                Some(b' ' | b'\t' | b'\n' | b'\r') => pos += 1,
+                Some(b'/') if self.at_comment(pos) => {
+                    match input[pos + 2..].windows(2).position(|w| w == b"*/") {
+                        Some(i) => pos += 2 + i + 2,
+                        // Unclosed: the layout skipper reports it.
+                        None => return true,
+                    }
+                }
+                Some(_) => return false,
+            }
+        }
     }
 
     /// The cursor is at a null slot (empty or `null`). Cold diagnostic helper.

@@ -459,3 +459,24 @@ fn f32_is_rounded_once() {
     let got = decode::<F32>(&format!("{{v}}:({lit})")).unwrap().v;
     assert_eq!(got.to_bits(), want.to_bits());
 }
+
+/// `null x` is a plain string (S2: only exactly `null` is the keyword). An
+/// `Option<String>` holding it is encoded bare and used to fail to decode.
+#[test]
+fn null_prefixed_plain_string_round_trips() {
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
+    struct O {
+        s: Option<String>,
+        n: Option<String>,
+    }
+    let v = O {
+        s: Some("null x".into()),
+        n: None,
+    };
+    let text = encode(&v).unwrap();
+    assert_eq!(text, "{s,n}:(null x,)");
+    assert_eq!(decode::<O>(&text).unwrap(), v);
+    // The keyword itself, with trailing layout, is still null.
+    let o: O = decode("{s,n}:(null /* c */ , null )").unwrap();
+    assert_eq!(o, O { s: None, n: None });
+}

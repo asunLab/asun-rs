@@ -190,7 +190,13 @@ impl<'a> PrettyFmt<'a> {
             }
             first = false;
             self.write_indent();
+            let before = self.pos;
             self.write_group();
+            if self.pos == before {
+                // A stray closer after the rows: copy it so the loop advances.
+                self.out.push(self.src[self.pos]);
+                self.pos += 1;
+            }
         }
         self.out.push(b'\n');
         self.depth -= 1;
@@ -348,5 +354,17 @@ impl<'a> PrettyFmt<'a> {
         for _ in 0..self.depth {
             self.out.extend_from_slice(b"  ");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pretty_format;
+
+    #[test]
+    fn stray_closer_after_rows_terminates() {
+        // Used to loop forever, growing the output without bound.
+        let out = pretty_format(b"[{a}]:(1))");
+        assert_eq!(out, "[{a}]:\n  (1),\n  )\n");
     }
 }
