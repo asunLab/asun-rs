@@ -41,11 +41,11 @@ ASUN declares the schema **once** and streams data as compact tuples:
 
 - Serde-free — its own `#[derive(AsunEncode, AsunDecode)]` macros, no serde dependency
 - Text and binary wire formats from a single pair of derives
-- Zero-copy binary decode (`&str` fields borrow from the input)
+- Zero-copy decode for text and binary (`Cow<str>` / `&str` fields borrow from the input)
 - Current API uses `encode` / `decode`, not the older `to_string` / `from_str` names
 - Optional scalar-hint schema output
 - Pretty text output
-- Works well for structs, vectors, options, enums, nested data, and entry-list based keyed collections
+- Works well for structs, vectors, options, enums, nested data, and `HashMap`/`BTreeMap` maps (`[age:30,score:95]`)
 - serde-aligned field attributes: `rename`, `skip`, `skip_serializing`, `skip_deserializing`, `skip_serializing_if`, `default`
 
 ## Install
@@ -193,6 +193,35 @@ let one: User = decode_binary_exact(&encode_binary(&user)?)?;
 (16 MiB) as a guard against hostile length prefixes; construct a
 `BinaryDecoder::with_max_sequence_len` if your protocol needs a different bound.
 
+### Zero-copy decoding
+
+Owned `String` fields allocate once per value, which is most of the decode time
+for string-heavy data. Use `Cow<'a, str>` to borrow from the input instead:
+
+```rust
+use std::borrow::Cow;
+
+#[derive(AsunEncode, AsunDecode)]
+struct UserRef<'a> {
+    id: i64,
+    name: Cow<'a, str>,
+    email: Option<Cow<'a, str>>,
+}
+
+let users: Vec<UserRef> = decode(&text)?; // `users` borrows from `text`
+```
+
+- `Cow` borrows every plain or quoted string and allocates only for a quoted
+  string with escapes (`"a\nb"`). Binary strings never contain escapes, so
+  they always borrow.
+- `&'a str` also borrows, but returns an error on an escaped string.
+- `Cow<str>` works in `Option`, `Vec` and as a `HashMap`/`BTreeMap` key or
+  value, and encodes exactly like `String`.
+
+In the bundled benchmark (`cargo run --release --example bench`, section 10),
+`Cow<str>` fields decode a flat 5000-row payload about 1.7× faster than
+`String` fields in text and about 4× faster in binary.
+
 ### 7. Errors
 
 Every fallible call returns `asun::Result<T>` (alias for `Result<T, asun::Error>`).
@@ -208,21 +237,22 @@ fn load(text: &str) -> asun::Result<Vec<User>> {
 
 ## Text Format Notes
 
-The text codec follows the ASUN 1.5 grammar
+The text codec follows the ASUN 1.6 grammar
 ([`GRAMMAR.abnf`](https://github.com/asunLab/asun/blob/main/conformance/GRAMMAR.abnf)).
 The rules you are most likely to notice:
 
 - **Minimal quoting.** Plain strings may contain spaces, `@`, `:`, `/` and `*`:
   `(hello world,alice@example.com,12:30)`. A string is quoted only when it
   contains `, ( ) [ ] { } " \`, a control character or `/*`, has leading or
-  trailing spaces, or would read back as another value (`"true"`, `"null"`,
-  `"42"`).
-- **Null.** `None` is an empty slot: `(Alice,)`. The keyword `null` means the
-  same thing and is what a top-level `None` (`null`) and a one-element
-  `vec![None]` (`[null]`) are written as.
-- **Commas are separators.** `n` commas always delimit `n + 1` slots, so
-  `(a,)` is `a` plus a null. A comma after the last row of `[{...}]:` is an
-  error.
+  trailing spaces, or would read back as another value (`"true"`, `"_"`,
+  `"42"`). Plain strings have no escapes; quoted strings use JSON escapes.
+- **Null.** `None` is written `_`: `(Alice,_)`, `[1,_,3]`. `null` is an
+  ordinary string.
+- **No blank positions.** `(a,)`, `[1,,2]` and a comma after the last row of
+  `[{...}]:` are errors. Write `_` for null.
+- **Maps.** `HashMap` and `BTreeMap` with string or integer keys encode as
+  `[age:30,score:95]`; the typed schema binding is `@[str:int]`. A map must be
+  a struct field, not the top-level value.
 - **Tuples and enums are arrays.** `(3, 4)` and tuple structs encode as `[3,4]`;
   a unit variant is its bare name (`Ping`), any other variant is
   `[Variant,...]`.
@@ -235,7 +265,8 @@ silent misread:
 
 - A tuple must have exactly as many slots as its schema.
 - Scalar hints (`@int`, `@float`, `@bool`, `@str`) are enforced.
-- Integers must fit the target type and floats must not overflow.
+- Numbers follow JSON (`007` is a string). Integers must fit the target type
+  and floats must not overflow.
 - Inside quoted strings, raw control characters, unknown escapes and lone
   surrogates are rejected.
 - Duplicate field names and trailing content are rejected.

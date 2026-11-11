@@ -15,7 +15,7 @@
 
 use crate::error::{Error, Result};
 use crate::simd;
-use crate::traits::AsunDecode;
+use crate::traits::{AsunDecode, AsunDecodeMapKey};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -152,6 +152,8 @@ pub struct Decoder<'de> {
     /// Cursors of the open ByName-mode structs, innermost last. Exact-mode
     /// structs — the common case — never touch it.
     byname_frames: Vec<ByNameCursor<'de>>,
+    /// Reading a map key: `:` ends a scalar token (GRAMMAR.abnf `entry`).
+    key_mode: bool,
 }
 
 /// One open positional group (see [`Decoder::seq_frames`]).
@@ -226,6 +228,7 @@ impl<'de> Decoder<'de> {
             seq_frames: Vec::new(),
             struct_frames: Vec::new(),
             byname_frames: Vec::new(),
+            key_mode: false,
         }
     }
 
@@ -265,31 +268,43 @@ impl<'de> Decoder<'de> {
     }
 
     /// True when a scalar token (number, keyword) may end at `pos`: end of
-    /// input, a slot delimiter, layout, or a comment.
+    /// input, a slot delimiter, layout, or a comment — and, in a map key, `:`.
     #[inline(always)]
     fn is_token_end_at(&self, pos: usize) -> bool {
         match self.input.get(pos) {
             None => true,
             Some(b',' | b')' | b']' | b' ' | b'\t' | b'\n' | b'\r') => true,
             Some(b'/') => self.at_comment(pos),
+            Some(b':') => self.key_mode,
             Some(_) => false,
         }
     }
 
-    /// The cursor is at an empty slot: the next byte closes or separates it.
+    /// The cursor is at a blank position: the next byte closes or separates
+    /// it (or the input ends). A blank position is always an error.
     #[inline(always)]
     fn at_value_end(&self) -> bool {
         matches!(self.input.get(self.pos), None | Some(b',' | b')' | b']'))
     }
 
-    /// The cursor is at the keyword `null`. Only layout may follow it in the
-    /// slot: `null x` is the plain string "null x" (S2).
+    /// The error for a blank position at the cursor: [`Error::EmptySlot`], or
+    /// end of input.
+    #[cold]
+    fn blank_error(&self) -> Error {
+        if self.pos >= self.input.len() {
+            Error::Eof
+        } else {
+            Error::EmptySlot
+        }
+    }
+
+    /// The cursor is at the null token `_`. Only layout may follow it in the
+    /// slot: `_ x` is the plain string "_ x" (S2).
     #[inline(always)]
-    fn at_null_keyword(&self) -> bool {
-        self.input.len() >= self.pos + 4
-            && &self.input[self.pos..self.pos + 4] == b"null"
-            && self.is_token_end_at(self.pos + 4)
-            && self.slot_ends_after_layout(self.pos + 4)
+    fn at_null_token(&self) -> bool {
+        self.peek_is(b'_')
+            && self.is_token_end_at(self.pos + 1)
+            && self.slot_ends_after_layout(self.pos + 1)
     }
 
     /// True when only layout separates `pos` from the end of the slot.
@@ -310,12 +325,6 @@ impl<'de> Decoder<'de> {
                 Some(_) => return false,
             }
         }
-    }
-
-    /// The cursor is at a null slot (empty or `null`). Cold diagnostic helper.
-    #[cold]
-    fn at_null(&self) -> bool {
-        self.at_value_end() || self.at_null_keyword()
     }
 
     /// The most precise error for "the byte at the cursor is not acceptable
@@ -342,14 +351,15 @@ impl<'de> Decoder<'de> {
         }
     }
 
-    /// Diagnose a scalar that failed to parse: a null slot gets its own error.
+    /// Diagnose a scalar that failed to parse: a blank position and `_` get
+    /// their own errors.
     #[cold]
     #[inline(never)]
     fn scalar_error(&self, fallback: Error) -> Error {
-        if self.at_null() {
-            Error::NullNotAllowed
-        } else {
-            fallback
+        match self.input.get(self.pos) {
+            Some(b',' | b')' | b']') => Error::EmptySlot,
+            _ if self.at_null_token() => Error::NullNotAllowed,
+            _ => fallback,
         }
     }
 
@@ -676,8 +686,32 @@ impl<'de> Decoder<'de> {
                     self.pos += 1;
                     return Ok(Ty::Arr(Box::new(Ty::Any)));
                 }
-                let inner = self.parse_binding()?;
+                // `[binding]` is an array, `[key-type:binding]` a map; either
+                // side of the map's `:` may be omitted.
+                let inner = if self.peek_is(b':') {
+                    Ty::Any
+                } else {
+                    self.parse_binding()?
+                };
                 self.skip_layout();
+                if self.peek_is(b':') {
+                    if !matches!(inner, Ty::Any | Ty::Str | Ty::Int) {
+                        return Err(Error::msg("map key type must be str or int"));
+                    }
+                    self.pos += 1;
+                    self.skip_layout();
+                    let value = if self.peek_is(b']') {
+                        Ty::Any
+                    } else {
+                        self.parse_binding()?
+                    };
+                    self.skip_layout();
+                    if !self.peek_is(b']') {
+                        return Err(Error::msg("expected ']' in map type annotation"));
+                    }
+                    self.pos += 1;
+                    return Ok(Ty::Map(Box::new(inner), Box::new(value)));
+                }
                 if !self.peek_is(b']') {
                     return Err(Error::msg("expected ']' in array type annotation"));
                 }
@@ -709,28 +743,34 @@ impl<'de> Decoder<'de> {
     // -----------------------------------------------------------------------
 
     /// Skip the value in one slot, leaving the cursor on the `,` / `)` / `]`
-    /// that ends it. An empty slot is a no-op.
+    /// that ends it.
     ///
-    /// Tracks quotes, escapes, comments and bracket nesting, and every
-    /// iteration consumes at least one byte or returns, so no input can make it
-    /// loop forever.
+    /// Tracks quotes, comments and bracket nesting, and rejects what a decoder
+    /// reading the value would reject structurally — a blank position or a
+    /// `\` outside quotes — so a document is accepted or rejected the same way
+    /// whether or not the target type has the field. Every iteration consumes
+    /// at least one byte or returns, so no input can make it loop forever.
     fn skip_value(&mut self) -> Result<()> {
         self.skip_layout();
+        if self.at_value_end() {
+            return Err(self.blank_error());
+        }
         // One bit per open group: 1 = `(`, 0 = `[`.
         let mut stack: u128 = 0;
         let mut depth: u32 = 0;
+        // Last structural byte seen (`(`, `[`, `,`), or 0 after any content.
+        let mut prev: u8 = 0;
         loop {
             let Some(&b) = self.input.get(self.pos) else {
                 return if depth == 0 { Ok(()) } else { Err(Error::Eof) };
             };
             match b {
-                b'"' => self.skip_quoted_string()?,
-                b'\\' => {
-                    if self.pos + 1 >= self.input.len() {
-                        return Err(Error::InvalidEscape('\\'));
-                    }
-                    self.pos += 2;
+                b'"' => {
+                    self.skip_quoted_string()?;
+                    prev = 0;
                 }
+                b'\\' => return Err(Error::UnexpectedChar('\\')),
+                b' ' | b'\t' | b'\n' | b'\r' => self.pos += 1,
                 b'/' if self.at_comment(self.pos) => {
                     let before = self.pos;
                     self.skip_whitespace_and_comments();
@@ -745,10 +785,14 @@ impl<'de> Decoder<'de> {
                     stack = (stack << 1) | (b == b'(') as u128;
                     depth += 1;
                     self.pos += 1;
+                    prev = b;
                 }
                 b')' | b']' => {
                     if depth == 0 {
                         return Ok(());
+                    }
+                    if prev == b',' {
+                        return Err(Error::EmptySlot);
                     }
                     if (stack & 1 == 1) != (b == b')') {
                         return Err(Error::UnexpectedChar(b as char));
@@ -756,10 +800,21 @@ impl<'de> Decoder<'de> {
                     stack >>= 1;
                     depth -= 1;
                     self.pos += 1;
+                    prev = 0;
                 }
                 b',' if depth == 0 => return Ok(()),
+                b',' => {
+                    if prev != 0 {
+                        return Err(Error::EmptySlot);
+                    }
+                    self.pos += 1;
+                    prev = b',';
+                }
                 b'{' | b'}' => return Err(Error::UnexpectedChar(b as char)),
-                _ => self.pos += 1,
+                _ => {
+                    self.pos += 1;
+                    prev = 0;
+                }
             }
         }
     }
@@ -770,24 +825,15 @@ impl<'de> Decoder<'de> {
 
     /// Parse a plain (unquoted) string value (GRAMMAR.abnf `plain-string`),
     /// stopping at a delimiter, a control character or a comment, and trimming
-    /// trailing whitespace. Returns a zero-copy borrow plus whether it
-    /// contains escapes.
+    /// trailing whitespace. Plain strings have no escapes, so the result is
+    /// always a zero-copy borrow; a `\` is an error.
     #[inline]
-    fn parse_plain_value_meta(&mut self) -> Result<(&'de str, bool)> {
+    fn parse_plain_value(&mut self) -> Result<&'de str> {
         let start = self.pos;
-        let mut has_escape = false;
         loop {
             self.pos = simd::simd_find_plain_delimiter(self.input, self.pos);
             match self.input.get(self.pos) {
-                Some(b'\\') => {
-                    has_escape = true;
-                    // A trailing backslash with no following byte is malformed;
-                    // a bare `self.pos += 2` would push past the end.
-                    if self.pos + 1 >= self.input.len() {
-                        return Err(Error::InvalidEscape('\\'));
-                    }
-                    self.pos += 2;
-                }
+                Some(b'\\') => return Err(Error::UnexpectedChar('\\')),
                 // Tab is whitespace, legal inside a plain string.
                 Some(b'\t') => self.pos += 1,
                 // A lone `/` is content; `/*` opens a comment.
@@ -795,22 +841,18 @@ impl<'de> Decoder<'de> {
                 _ => break,
             }
         }
+        if self.key_mode {
+            // A plain map key ends at its first `:`.
+            if let Some(i) = self.input[start..self.pos].iter().position(|&b| b == b':') {
+                self.pos = start + i;
+            }
+        }
         let mut end = self.pos;
         while end > start && matches!(self.input[end - 1], b' ' | b'\t') {
             end -= 1;
         }
-        // When escapes are present the slice may split a multi-byte UTF-8
-        // sequence (pos advanced by 2 past a `\`), which would make the
-        // `from_utf8_unchecked` reference invalid. Validate in that case; the
-        // no-escape fast path is guaranteed valid because the input is `&str`
-        // and every stop byte is ASCII.
-        let bytes = &self.input[start..end];
-        let raw = if has_escape {
-            core::str::from_utf8(bytes).map_err(|_| Error::InvalidEscape('\\'))?
-        } else {
-            unsafe { core::str::from_utf8_unchecked(bytes) }
-        };
-        Ok((raw, has_escape))
+        // Valid UTF-8: the input is a `&str` and every stop byte is ASCII.
+        Ok(unsafe { core::str::from_utf8_unchecked(&self.input[start..end]) })
     }
 
     /// Parse a quoted string. Zerocopy when no escapes; allocates only when escapes present.
@@ -864,15 +906,6 @@ impl<'de> Decoder<'de> {
                     b'r' => result.push('\r'),
                     b'b' => result.push('\u{0008}'),
                     b'f' => result.push('\u{000C}'),
-                    b',' => result.push(','),
-                    b'(' => result.push('('),
-                    b')' => result.push(')'),
-                    b'[' => result.push('['),
-                    b']' => result.push(']'),
-                    b'{' => result.push('{'),
-                    b'}' => result.push('}'),
-                    b':' => result.push(':'),
-                    b'@' => result.push('@'),
                     b'u' => {
                         let ch = read_unicode_escape(self.input, &mut self.pos)?;
                         result.push(ch);
@@ -912,7 +945,8 @@ impl<'de> Decoder<'de> {
         }
     }
 
-    /// Parse a string-typed slot (quoted or plain). A null slot is an error.
+    /// Parse a string-typed slot (quoted or plain). `_` and a blank position
+    /// are errors.
     #[inline]
     fn parse_string_slot(&mut self) -> Result<CowStr<'de>> {
         if let Some(hint) = self.pending.take()
@@ -924,15 +958,41 @@ impl<'de> Decoder<'de> {
         if self.peek_is(b'"') {
             return self.parse_quoted_string_cow();
         }
-        let (v, has_escape) = self.parse_plain_value_meta()?;
+        let v = self.parse_plain_value()?;
         if v.is_empty() {
             return Err(self.scalar_error(self.unexpected()));
         }
-        if has_escape {
-            return Ok(CowStr::Owned(unescape_plain(v)?));
-        }
-        if v.len() == 4 && v.as_bytes() == b"null" {
+        if v.as_bytes() == b"_" {
             return Err(Error::NullNotAllowed);
+        }
+        Ok(CowStr::Borrowed(v))
+    }
+
+    /// Parse a string map key: quoted, or plain up to the first `:`. Without
+    /// a key type (`@[:...]`) the key must not read back as another type
+    /// (SPEC S11): `true`, `false` and floats are rejected, integers are taken
+    /// as their text.
+    fn parse_string_key(&mut self) -> Result<CowStr<'de>> {
+        let untyped = match self.pending.take() {
+            None => true,
+            Some(Ty::Str) => false,
+            Some(_) => return Err(Error::HintMismatch),
+        };
+        self.skip_layout();
+        if self.peek_is(b'"') {
+            return self.parse_quoted_string_cow();
+        }
+        let v = self.parse_plain_value()?;
+        if v.is_empty() {
+            return Err(if self.at_value_end() {
+                self.blank_error()
+            } else {
+                Error::InvalidMapKey
+            });
+        }
+        let b = v.as_bytes();
+        if b == b"_" || (untyped && (b == b"true" || b == b"false" || is_float_literal(b))) {
+            return Err(Error::InvalidMapKey);
         }
         Ok(CowStr::Borrowed(v))
     }
@@ -968,7 +1028,11 @@ impl<'de> Decoder<'de> {
             self.pos += 1;
         }
         let digits = self.pos - start;
-        if digits == 0 || !self.is_token_end_at(self.pos) {
+        // JSON numbers: no leading zeros (`007` is a plain string).
+        if digits == 0
+            || !self.is_token_end_at(self.pos)
+            || (digits > 1 && self.input[start] == b'0')
+        {
             return Err(Error::InvalidNumber);
         }
         if digits > 18 {
@@ -987,7 +1051,7 @@ impl<'de> Decoder<'de> {
         })
     }
 
-    /// Parse a signed integer literal (`-?[0-9]+`).
+    /// Parse a signed integer literal (`-?(0|[1-9][0-9]*)`).
     #[inline]
     fn parse_i64(&mut self) -> Result<i64> {
         let negative = self.peek_is(b'-');
@@ -1026,7 +1090,7 @@ impl<'de> Decoder<'de> {
 
     /// Parse f64 directly using fast-float for speed.
     ///
-    /// Enforces GRAMMAR.abnf `number = ["-"] 1*DIGIT ["." 1*DIGIT] [exponent]`:
+    /// Enforces GRAMMAR.abnf `number = ["-"] int ["." 1*DIGIT] [exponent]`:
     /// integers are accepted (a float target takes `3` as `3.0`), but `"5."`,
     /// `".5"` or `"+5"` are not numbers. With `int_only` (an `@int` hint) a
     /// fraction or exponent is a hint mismatch. Overflow to infinity is an
@@ -1052,7 +1116,7 @@ impl<'de> Decoder<'de> {
             digits += 1;
             self.pos += 1;
         }
-        if self.pos == int_start {
+        if self.pos == int_start || (self.pos - int_start > 1 && self.input[int_start] == b'0') {
             return Err(Error::InvalidNumber);
         }
         let mut had_dot_or_exp = false;
@@ -1067,7 +1131,8 @@ impl<'de> Decoder<'de> {
                     break;
                 }
                 mantissa = mantissa.wrapping_mul(10).wrapping_add(d as u64);
-                digits += 1;
+                // Leading zeros (`0.000123`) are not significant digits.
+                digits += (mantissa != 0) as u32;
                 self.pos += 1;
             }
             if self.pos == frac_start {
@@ -1105,7 +1170,12 @@ impl<'de> Decoder<'de> {
         // the target type, one multiply or divide gives the correctly rounded
         // result. Parsing directly in the target type (rather than f64 then
         // narrowing) also avoids double rounding for f32.
-        if digits <= F::EXACT_DIGITS && exp10.unsigned_abs() <= F::EXACT_POW10 {
+        // At most 19 significant digits keeps the wrapping accumulation exact
+        // in a u64.
+        if digits <= 19
+            && mantissa <= F::MAX_EXACT_MANTISSA
+            && exp10.unsigned_abs() <= F::EXACT_POW10
+        {
             return Ok(F::fast(mantissa, exp10, negative));
         }
         let v = F::parse_slow(&self.input[start..self.pos]).ok_or(Error::InvalidNumber)?;
@@ -1302,26 +1372,35 @@ impl<'de> Decoder<'de> {
         }
     }
 
+    /// Decode a string as `Cow<'de, str>`: borrowed from the input when the
+    /// value has no escapes, owned only when a quoted string contains one.
+    #[inline]
+    pub fn decode_cow_str(&mut self) -> Result<std::borrow::Cow<'de, str>> {
+        if self.default_depth > 0 {
+            return Ok(std::borrow::Cow::Borrowed(""));
+        }
+        Ok(self.parse_string_slot()?.into())
+    }
+
+    /// Decode `Option<T>`: `_` is `None`, anything else is `Some`. A blank
+    /// position is an error, reported by `T`'s decoder.
     #[inline]
     pub fn decode_option<T: AsunDecode<'de>>(&mut self) -> Result<Option<T>> {
         if self.default_depth > 0 {
             return Ok(None);
         }
         self.skip_layout();
-        if self.at_value_end() {
+        if self.at_null_token() {
             self.pending = None;
-            Ok(None)
-        } else if self.at_null_keyword() {
-            self.pending = None;
-            self.pos += 4;
+            self.pos += 1;
             Ok(None)
         } else {
             Ok(Some(T::decode(self)?))
         }
     }
 
-    /// Decode `()` / a unit struct. Unit carries no data, so it is a null slot
-    /// (empty or `null`); the legacy `()` spelling is accepted too.
+    /// Decode `()` / a unit struct. Unit carries no data, so it is null (`_`);
+    /// the zero-element tuple `()` is accepted too.
     #[inline]
     pub fn decode_unit(&mut self) -> Result<()> {
         if self.default_depth > 0 {
@@ -1329,11 +1408,8 @@ impl<'de> Decoder<'de> {
         }
         self.pending = None;
         self.skip_layout();
-        if self.at_value_end() {
-            return Ok(());
-        }
-        if self.at_null_keyword() {
-            self.pos += 4;
+        if self.at_null_token() {
+            self.pos += 1;
             return Ok(());
         }
         if self.peek_is(b'(') {
@@ -1466,6 +1542,104 @@ impl<'de> Decoder<'de> {
     }
 
     // -----------------------------------------------------------------------
+    // Maps
+    // -----------------------------------------------------------------------
+
+    /// Decode a map `[key:value, ...]` (SPEC S11), handing each entry to
+    /// `insert`, which reports duplicate keys. `[]` is the empty map.
+    pub fn decode_map<K, V>(&mut self, mut insert: impl FnMut(K, V) -> Result<()>) -> Result<()>
+    where
+        K: AsunDecodeMapKey<'de>,
+        V: AsunDecode<'de>,
+    {
+        if self.default_depth > 0 {
+            return Ok(());
+        }
+        let (key_ty, value_ty) = match self.pending.take() {
+            None => (None, None),
+            Some(Ty::Map(k, v)) => (k.as_hint(), v.as_hint()),
+            Some(_) => return Err(Error::HintMismatch),
+        };
+        self.skip_layout();
+        if !self.peek_is(b'[') {
+            return Err(self.scalar_error(Error::ExpectedOpenBracket));
+        }
+        self.enter()?;
+        let r = self.decode_map_entries(key_ty, value_ty, &mut insert);
+        self.leave();
+        r
+    }
+
+    fn decode_map_entries<K, V>(
+        &mut self,
+        key_ty: Option<&'de Ty>,
+        value_ty: Option<&'de Ty>,
+        insert: &mut impl FnMut(K, V) -> Result<()>,
+    ) -> Result<()>
+    where
+        K: AsunDecodeMapKey<'de>,
+        V: AsunDecode<'de>,
+    {
+        self.pos += 1; // '['
+        self.skip_layout();
+        if self.peek_is(b']') {
+            self.pos += 1;
+            return Ok(());
+        }
+        loop {
+            self.skip_layout();
+            if self.at_value_end() {
+                return Err(self.blank_error());
+            }
+            self.pending = key_ty;
+            self.key_mode = true;
+            let key = K::decode_key(self);
+            self.key_mode = false;
+            let key = key?;
+            self.skip_layout();
+            if !self.peek_is(b':') {
+                return Err(Error::InvalidMapKey);
+            }
+            self.pos += 1;
+            self.pending = value_ty;
+            let value = V::decode(self)?;
+            insert(key, value)?;
+            self.skip_layout();
+            match self.input.get(self.pos) {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                None => return Err(Error::UnclosedBracket),
+                _ => return Err(self.unexpected()),
+            }
+        }
+    }
+
+    /// Decode a string map key (owned).
+    pub fn decode_map_key_string(&mut self) -> Result<String> {
+        Ok(match self.parse_string_key()? {
+            CowStr::Borrowed(s) => s.to_owned(),
+            CowStr::Owned(s) => s,
+        })
+    }
+
+    /// Decode a string map key as `Cow<'de, str>`: borrowed unless the quoted
+    /// key contains an escape.
+    pub fn decode_map_key_cow_str(&mut self) -> Result<std::borrow::Cow<'de, str>> {
+        Ok(self.parse_string_key()?.into())
+    }
+
+    /// Decode a string map key, borrowed from the input.
+    pub fn decode_map_key_borrowed_str(&mut self) -> Result<&'de str> {
+        match self.parse_string_key()? {
+            CowStr::Borrowed(s) => Ok(s),
+            CowStr::Owned(_) => Err(Error::msg("cannot borrow &str from an escaped string")),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Tuple seam (plain tuples, tuple structs, tuple enum variants)
     // -----------------------------------------------------------------------
 
@@ -1506,10 +1680,10 @@ impl<'de> Decoder<'de> {
         frame.index += 1;
         if index > 0 {
             self.expect_slot_comma(closer, index + 1, index)?;
-        } else if closer == b']' {
-            // `[]` is an array with zero slots, not one null slot.
+        } else if closer != 0 {
+            // `[]` / `()` have zero elements.
             self.skip_layout();
-            if self.peek_is(b']') {
+            if self.peek_is(closer) {
                 return Err(Error::FieldCountMismatch {
                     expected: 1,
                     got: 0,
@@ -1641,6 +1815,15 @@ impl<'de> Decoder<'de> {
         }
     }
 
+    /// `()` where the struct's schema has fields.
+    #[cold]
+    fn empty_tuple_error(&self) -> Error {
+        Error::FieldCountMismatch {
+            expected: self.source_len() as u32,
+            got: 0,
+        }
+    }
+
     /// Number of slots the current struct's source tuple must have.
     #[inline(always)]
     fn source_len(&self) -> usize {
@@ -1662,6 +1845,9 @@ impl<'de> Decoder<'de> {
             } else {
                 self.expect_slot_comma(b')', self.source_len(), index)?;
             }
+        } else if self.peek_is(b')') {
+            // `()` has zero elements, not one blank one.
+            return Err(self.empty_tuple_error());
         }
         self.pending = match self.schema_fields {
             Some(fields) => fields.ty_at(index),
@@ -1687,6 +1873,11 @@ impl<'de> Decoder<'de> {
                 state.source_index += 1;
                 if source_index > 0 {
                     self.expect_slot_comma(b')', fields.len(), source_index)?;
+                } else {
+                    self.skip_layout();
+                    if self.peek_is(b')') {
+                        return Err(self.empty_tuple_error());
+                    }
                 }
                 self.pending = fields.ty_at(source_index);
                 return Ok(Some(fields.name_at(source_index)));
@@ -1854,6 +2045,8 @@ pub(crate) enum Ty {
     Obj(Schema),
     /// `@[...]`; `Arr(Any)` for the untyped `@[]`.
     Arr(Box<Ty>),
+    /// `@[K:V]`: key type (`Any`, `Str` or `Int`) and value type.
+    Map(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
@@ -1974,8 +2167,8 @@ impl<'de> SchemaFields<'de> {
 
 /// A float type the decoder can produce directly (no f64 → f32 narrowing).
 trait FloatTarget: Copy {
-    /// Mantissas with at most this many digits are exact.
-    const EXACT_DIGITS: u32;
+    /// Integer mantissas up to this value are exact (`2^53` for f64).
+    const MAX_EXACT_MANTISSA: u64;
     /// `10^k` is exact for `k` up to this.
     const EXACT_POW10: u64;
     /// `±mantissa × 10^exp10` within the exact ranges above.
@@ -1985,7 +2178,7 @@ trait FloatTarget: Copy {
 }
 
 impl FloatTarget for f64 {
-    const EXACT_DIGITS: u32 = 15;
+    const MAX_EXACT_MANTISSA: u64 = 1 << 53;
     const EXACT_POW10: u64 = 22;
     #[inline(always)]
     fn fast(mantissa: u64, exp10: i64, negative: bool) -> f64 {
@@ -2012,7 +2205,7 @@ impl FloatTarget for f64 {
 }
 
 impl FloatTarget for f32 {
-    const EXACT_DIGITS: u32 = 7;
+    const MAX_EXACT_MANTISSA: u64 = 1 << 24;
     const EXACT_POW10: u64 = 10;
     #[inline(always)]
     fn fast(mantissa: u64, exp10: i64, negative: bool) -> f32 {
@@ -2048,6 +2241,16 @@ pub(crate) fn cautious_capacity<T>(n: usize) -> usize {
 enum CowStr<'a> {
     Borrowed(&'a str),
     Owned(String),
+}
+
+impl<'a> From<CowStr<'a>> for std::borrow::Cow<'a, str> {
+    #[inline]
+    fn from(s: CowStr<'a>) -> Self {
+        match s {
+            CowStr::Borrowed(s) => std::borrow::Cow::Borrowed(s),
+            CowStr::Owned(s) => std::borrow::Cow::Owned(s),
+        }
+    }
 }
 
 impl<'a> CowStr<'a> {
@@ -2109,49 +2312,34 @@ fn read_unicode_escape(input: &[u8], pos: &mut usize) -> Result<char> {
     char::from_u32(cp).ok_or(Error::InvalidUnicodeEscape)
 }
 
-/// Unescape a plain (unquoted) value.
-///
-/// Works on bytes and bulk-copies the runs between escapes. The previous
-/// implementation pushed `bytes[i] as char`, which reinterprets each byte as a
-/// code point and therefore corrupted every multi-byte character in any value
-/// that also contained an escape.
-fn unescape_plain(s: &str) -> Result<String> {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let run_start = i;
-        while i < bytes.len() && bytes[i] != b'\\' {
-            i += 1;
-        }
-        out.extend_from_slice(&bytes[run_start..i]);
-        if i >= bytes.len() {
-            break;
-        }
-        i += 1;
-        if i >= bytes.len() {
-            return Err(Error::Eof);
-        }
-        match bytes[i] {
-            b @ (b',' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b':' | b'@' | b'"' | b'\\'
-            | b'/') => out.push(b),
-            b'n' => out.push(b'\n'),
-            b't' => out.push(b'\t'),
-            b'r' => out.push(b'\r'),
-            b'b' => out.push(0x08),
-            b'f' => out.push(0x0c),
-            b'u' => {
-                let mut p = i + 1;
-                let ch = read_unicode_escape(bytes, &mut p)?;
-                let mut tmp = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
-                i = p - 1;
-            }
-            other => return Err(Error::InvalidEscape(other as char)),
-        }
-        i += 1;
+/// The token is a JSON number with a fraction or an exponent.
+fn is_float_literal(b: &[u8]) -> bool {
+    let digits = b.strip_prefix(b"-").unwrap_or(b);
+    let int_len = digits.iter().take_while(|c| c.is_ascii_digit()).count();
+    if int_len == 0 || (int_len > 1 && digits[0] == b'0') {
+        return false;
     }
-    // SAFETY: `s` is valid UTF-8; runs are cut at ASCII `\` so they stay on
-    // character boundaries, and every pushed replacement is valid UTF-8.
-    Ok(unsafe { String::from_utf8_unchecked(out) })
+    let mut rest = &digits[int_len..];
+    let mut float = false;
+    if let Some(frac) = rest.strip_prefix(b".") {
+        let n = frac.iter().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return false;
+        }
+        rest = &frac[n..];
+        float = true;
+    }
+    if let Some(exp) = rest.strip_prefix(b"e").or_else(|| rest.strip_prefix(b"E")) {
+        let exp = exp
+            .strip_prefix(b"+")
+            .or_else(|| exp.strip_prefix(b"-"))
+            .unwrap_or(exp);
+        let n = exp.iter().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return false;
+        }
+        rest = &exp[n..];
+        float = true;
+    }
+    float && rest.is_empty()
 }

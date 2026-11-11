@@ -302,6 +302,22 @@ impl BinaryEncoder {
         Ok(())
     }
 
+    /// Write a map: `uvarint` entry count, then each key and value.
+    #[inline]
+    pub fn write_map<'a, K, V, I>(&mut self, len: usize, entries: I) -> Result<()>
+    where
+        K: AsunEncodeBinary + ?Sized + 'a,
+        V: AsunEncodeBinary + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a K, &'a V)>,
+    {
+        self.write_uvarint(len as u64);
+        for (key, value) in entries {
+            key.encode_binary(self)?;
+            value.encode_binary(self)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn write_variant_index(&mut self, index: u32) -> Result<()> {
         self.write_uvarint(index as u64);
@@ -611,6 +627,32 @@ impl<'de> BinaryDecoder<'de> {
         }
         self.depth -= 1;
         Ok(out)
+    }
+
+    /// Read a map written by [`BinaryEncoder::write_map`], handing each entry
+    /// to `insert` (which reports duplicate keys). Bounded like [`read_vec`].
+    ///
+    /// [`read_vec`]: BinaryDecoder::read_vec
+    pub fn read_map<K, V>(&mut self, mut insert: impl FnMut(K, V) -> Result<()>) -> Result<()>
+    where
+        K: AsunDecodeBinary<'de>,
+        V: AsunDecodeBinary<'de>,
+    {
+        let count = self.read_len()?;
+        if count > self.max_sequence_len {
+            return Err(Error::SequenceTooLong);
+        }
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::DepthLimitExceeded);
+        }
+        self.depth += 1;
+        let r = (0..count).try_for_each(|_| {
+            let key = K::decode_binary(self)?;
+            let value = V::decode_binary(self)?;
+            insert(key, value)
+        });
+        self.depth -= 1;
+        r
     }
 
     #[inline]

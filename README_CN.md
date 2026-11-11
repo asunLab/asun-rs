@@ -35,11 +35,11 @@ ASUN 只声明 **一次** Schema，数据以紧凑元组方式流式传输：
 
 - 无 serde —— 使用自带的 `#[derive(AsunEncode, AsunDecode)]` 宏，不依赖 serde
 - 一对 derive 同时生成文本与二进制两种线格式
-- 二进制零拷贝解码（`&str` 字段直接借用输入缓冲区）
+- 文本和二进制都支持零拷贝解码（`Cow<str>` / `&str` 字段直接借用输入缓冲区）
 - 当前 API 是 `encode` / `decode`，不再是旧文档里的 `to_string` / `from_str`
 - 支持可选的带基本类型提示 Schema 输出
 - 支持更易读的 pretty 文本
-- 适用于结构体、向量、Option、枚举、嵌套数据，以及基于条目列表的键值集合
+- 适用于结构体、向量、Option、枚举、嵌套数据，以及 `HashMap`/`BTreeMap` 映射（`[age:30,score:95]`）
 - 与 serde 对齐的字段属性：`rename`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`default`
 
 ## 安装
@@ -168,6 +168,29 @@ let one: User = decode_binary_exact(&encode_binary(&user)?)?;
 
 `decode_binary` 会把解码序列的长度上限约束在 `DEFAULT_MAX_SEQUENCE_LEN`（16 MiB），以防御恶意的长度前缀；如果你的协议需要不同的上限，可用 `BinaryDecoder::with_max_sequence_len` 构造。
 
+### 零拷贝解码
+
+`String` 字段每个值都要分配一次内存，字符串多的数据里这占了解码的大部分时间。改用 `Cow<'a, str>` 可以直接借用输入：
+
+```rust
+use std::borrow::Cow;
+
+#[derive(AsunEncode, AsunDecode)]
+struct UserRef<'a> {
+    id: i64,
+    name: Cow<'a, str>,
+    email: Option<Cow<'a, str>>,
+}
+
+let users: Vec<UserRef> = decode(&text)?; // users 借用 text
+```
+
+- `Cow` 对普通字符串和不含转义的带引号字符串都直接借用，只有带转义的带引号字符串（如 `"a\nb"`）才分配。二进制字符串没有转义，所以总是借用。
+- `&'a str` 也能借用，但遇到带转义的字符串会报错。
+- `Cow<str>` 可以用在 `Option`、`Vec` 里，也可以作 `HashMap`/`BTreeMap` 的键或值；编码结果和 `String` 完全相同。
+
+在自带的 benchmark（`cargo run --release --example bench` 第 10 节）里，5000 行的扁平数据用 `Cow<str>` 字段解码，文本比 `String` 快约 1.7 倍，二进制快约 4 倍。
+
 ### 7. 错误处理
 
 所有可能失败的调用都返回 `asun::Result<T>`（即 `Result<T, asun::Error>` 的别名）。`Error` 实现了 `std::error::Error` + `Display`，因此可直接用 `?` 传播，也能接入任意错误处理 crate。
@@ -181,14 +204,17 @@ fn load(text: &str) -> asun::Result<Vec<User>> {
 
 ## 文本格式要点
 
-文本编解码遵循 ASUN 1.5 语法（[`GRAMMAR.abnf`](https://github.com/asunLab/asun/blob/main/conformance/GRAMMAR.abnf)）。最容易注意到的规则：
+文本编解码遵循 ASUN 1.6 语法（[`GRAMMAR.abnf`](https://github.com/asunLab/asun/blob/main/conformance/GRAMMAR.abnf)）。最容易注意到的规则：
 
 - **最少引号**：普通字符串可以直接包含空格、`@`、`:`、`/`、`*`，例如 `(hello world,alice@example.com,12:30)`。以下情况才会加引号：
   - 含有 `, ( ) [ ] { } " \`、控制字符或 `/*`；
   - 首尾有空格；
-  - 读回来会变成别的值（`"true"`、`"null"`、`"42"`）。
-- **null**：`None` 写成空槽，如 `(Alice,)`。关键字 `null` 含义相同：顶层的 `None` 写成 `null`，只有一个元素的 `vec![None]` 写成 `[null]`。
-- **逗号是纯分隔符**：`n` 个逗号总是分出 `n + 1` 个槽，所以 `(a,)` 是 `a` 加一个 null。`[{...}]:` 最后一行后面再跟逗号是错误。
+  - 读回来会变成别的值（`"true"`、`"_"`、`"42"`）。
+
+  普通字符串没有转义；带引号的字符串使用 JSON 转义。
+- **null**：`None` 写成 `_`，如 `(Alice,_)`、`[1,_,3]`。`null` 只是普通字符串。
+- **不允许空位**：`(a,)`、`[1,,2]`，以及 `[{...}]:` 最后一行后面的逗号都是错误。null 请写 `_`。
+- **映射**：键为字符串或整数的 `HashMap`、`BTreeMap` 写成 `[age:30,score:95]`，带类型的 schema 绑定为 `@[str:int]`。映射必须是结构体字段，不能作为顶层值。
 - **元组和枚举写成数组**：`(3, 4)` 和元组结构体写成 `[3,4]`。单元变体写成名字本身（`Ping`），其余变体写成 `[变体名,...]`。
 - **注释**：凡是能写空白的地方都可以写 `/* ... */`。
 - **字段名**：不在 `[A-Za-z0-9_]` 范围内的字段名在 schema 中加引号，如 `{"a-b",name}`。
@@ -197,7 +223,7 @@ fn load(text: &str) -> asun::Result<Vec<User>> {
 
 - 槽数必须和 schema 一致；
 - `@int`、`@float`、`@bool`、`@str` 提示会被检查；
-- 整数必须放得进目标类型，浮点数不能溢出；
+- 数字遵循 JSON（`007` 是字符串）；整数必须放得进目标类型，浮点数不能溢出；
 - 引号字符串里的裸控制字符、未知转义、孤立代理都会报错；
 - 重复字段名、文档末尾多余内容也会报错。
 

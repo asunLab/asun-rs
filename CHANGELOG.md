@@ -2,22 +2,44 @@
 
 ## 1.3.0
 
-The text codec now follows the ASUN 1.5 grammar
+The text codec now follows the ASUN 1.6 grammar
 ([`GRAMMAR.abnf`](https://github.com/asunLab/asun/blob/main/conformance/GRAMMAR.abnf)).
-The binary format is unchanged. `asun-derive` is unchanged and stays at 1.2.0.
+The binary format is unchanged except for the new map support. `asun-derive`
+is unchanged and stays at 1.2.0.
+
+### Maps
+
+- `HashMap<K, V>` and `BTreeMap<K, V>` are supported in text and binary, with
+  `String`/`&str` or integer keys. Text data is `[age:30,score:95]` and the
+  typed schema binding is `@[str:int]` (`@[int:...]` for integer keys).
+- A key that contains `:` or would read back as another value is quoted.
+  Duplicate keys are an error when decoding.
+- A map cannot be a top-level value; wrap it in a struct.
+- Binary: a uvarint count followed by key/value pairs.
+
+### Zero-copy strings
+
+- `Cow<'de, str>` is supported in text and binary, in `Option`, `Vec` and as
+  a map key or value. It borrows from the input and allocates only for a
+  quoted string with escapes, where `&str` returns an error. In the bundled
+  benchmark, `Cow<str>` fields decode about 1.7× faster than `String` in text
+  and about 4× faster in binary.
 
 ### Text output changes
 
 - Strings are quoted only when needed. Spaces, `@`, `:`, `/` and `*` stay
   bare: `(hello world,alice@example.com,12:30)`.
-- `"null"` is quoted, since `null` is now a keyword. Capitalised forms such as
-  `TRUE` and `True` are no longer quoted, because keywords are case-sensitive.
+- Null is written `_`: `None` in a struct is `(Alice,_)`, a top-level `None`
+  is `_` and `vec![None]` is `[_]`. The string `"_"` is quoted; `null` is an
+  ordinary string and is written bare.
+- Capitalised forms such as `TRUE` and `True` are no longer quoted, because
+  keywords are case-sensitive.
+- Plain strings never contain backslash escapes. A string containing `\` or a
+  structural character is quoted, and quoted strings use JSON escapes only.
 - Rust tuples and tuple structs encode as arrays (`[3,4]`, previously `(3,4)`).
 - Enum variants with data encode as `[Variant,...]` (previously
   `(Variant,...)`). Unit variants are still the bare name.
-- `()` and unit structs encode as null (an empty slot) instead of `()`.
-- A top-level `None` encodes as `null`, and a one-element `vec![None]` as
-  `[null]`.
+- `()` and unit structs encode as `_` instead of `()`.
 - Field names outside `[A-Za-z0-9_]` are quoted in every schema header,
   including the `[{...}]:` header of a top-level `Vec<Struct>`.
 - In typed output, tuple fields are bound as `@[]` and enum fields carry no
@@ -26,10 +48,15 @@ The binary format is unchanged. `asun-derive` is unchanged and stays at 1.2.0.
 
 ### Decoding is strict
 
-- A tuple must have exactly as many slots as its schema. Commas are pure
-  separators: `(a,)` is `a` plus a null, and a trailing comma after the last
-  row of `[{...}]:` is an error.
-- `null` is a keyword (`"null"` is the string).
+- A tuple must have exactly as many slots as its schema.
+- Blank positions are errors (`EmptySlot`): `(a,)`, `(,a)`, `[1,,2]` and
+  `[1,]` are rejected, including inside skipped unknown fields. Write `_` for
+  null. A trailing comma after the last row of `[{...}]:` is an error.
+- `_` is the only null. `null` decodes as the string `"null"`, so it is an
+  error for an `Option<i64>` target.
+- A backslash in a plain value is an error; the old `\,`-style plain escapes
+  are gone. Quoted strings reject the old structural escapes such as `\(`.
+- Numbers follow JSON: `007` and `-01` are strings, not integers.
 - Scalar hints are enforced: `@int` rejects `1.5`, `@str` rejects a numeric
   target, and so on. Nested `@{...}` bindings now map fields by name instead
   of being ignored.
@@ -75,8 +102,8 @@ crashing or stalling the process.
 
 - `f32` values are rounded once. They used to be parsed as `f64` and then
   narrowed, which could be off by one ulp.
-- A plain `&str` field holding escapes returns an error instead of the raw
-  escaped text.
+- A `&str` field holding a quoted string with escapes returns an error
+  instead of the raw escaped text.
 - `pretty` output keeps a leading null slot when a group is expanded, and no
   longer treats `<`/`>` as brackets.
 
@@ -88,7 +115,8 @@ from 1.6× to 1.95×.
 
 - Struct decode plans are cached on the parsed schema.
 - Short strings are copied without a `memcpy` call.
-- Floats use an exact fast path, and integers skip overflow checks below 19
+- Floats use an exact fast path whenever the significant digits fit in 2^53
+  (leading zeros do not count), and integers skip overflow checks below 19
   digits.
 - Struct encoding no longer allocates per row.
 - Binary codec (format unchanged): fixed-size values and short strings are
@@ -98,12 +126,15 @@ from 1.6× to 1.95×.
 ### Compatibility
 
 - Data written by 1.2 that 1.3 rejects:
+  - blank null slots such as `(Alice,)`, which must become `(Alice,_)`;
+  - backslash escapes in plain strings;
+  - numbers with leading zeros where an integer is expected;
   - a trailing comma after the last row of `[{...}]:`;
   - `@type?` hints;
   - unquoted field names containing `+` or `-`;
   - values that only decoded through lenient number parsing.
 - Data written by 1.3 that 1.2 cannot read reliably: tuples and enum payloads
-  as `[...]`, the `null` keyword, and bare `@`/`:` in values. A 1.2 decoder
+  as `[...]`, `_` for null, maps, and bare `@`/`:` in values. A 1.2 decoder
   can hang on a bare `:`. Upgrade readers before writers.
-- Other ASUN language implementations have not been updated to the 1.5
+- Other ASUN language implementations have not been updated to the 1.6
   grammar yet.

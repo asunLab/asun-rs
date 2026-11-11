@@ -65,8 +65,15 @@ pub enum Error {
     BareTuple,
     /// A byte that cannot start or continue the expected token.
     UnexpectedChar(char),
-    /// A null slot (empty or `null`) decoded into a non-`Option` target.
+    /// A null (`_`) decoded into a non-`Option` target.
     NullNotAllowed,
+    /// A blank position (`(1,,3)`, `(a,)`, `[1,]`): null is written `_`.
+    EmptySlot,
+    /// The same key appears twice in one map.
+    DuplicateKey,
+    /// A map key that is not a string or an integer (`_`, `true`, `1.5`), or
+    /// a map entry without its `key:` part.
+    InvalidMapKey,
     /// A scalar hint (`@int` …) the value or the target type contradicts.
     HintMismatch,
     /// The same field name appears twice in one schema.
@@ -131,6 +138,9 @@ impl fmt::Display for Error {
             Error::BareTuple => write!(f, "a top-level tuple needs a schema"),
             Error::UnexpectedChar(c) => write!(f, "unexpected character {:?}", c),
             Error::NullNotAllowed => write!(f, "null value for a non-optional target"),
+            Error::EmptySlot => write!(f, "blank position: write `_` for null"),
+            Error::DuplicateKey => write!(f, "duplicate map key"),
+            Error::InvalidMapKey => write!(f, "invalid map key or entry"),
             Error::HintMismatch => write!(f, "value does not match its schema type hint"),
             Error::DuplicateField => write!(f, "duplicate field name in schema"),
             Error::InvalidFieldName => write!(f, "invalid bare field name"),

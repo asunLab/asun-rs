@@ -137,7 +137,9 @@ pub use decode::decode;
 pub use encode::{encode, encode_typed};
 pub use error::{Error, Result};
 pub use pretty::{encode_pretty, encode_pretty_typed, pretty_format};
-pub use traits::{AsunDecode, AsunDecodeBinary, AsunEncode, AsunEncodeBinary};
+pub use traits::{
+    AsunDecode, AsunDecodeBinary, AsunDecodeMapKey, AsunEncode, AsunEncodeBinary, AsunMapKey,
+};
 
 /// Derive macros for the asun encode/decode traits.
 pub use asun_derive::{AsunDecode, AsunEncode};
@@ -226,10 +228,18 @@ mod tests {
             id: i64,
             label: Option<String>,
         }
-        let input = "{id,label}:(1,)";
+        let input = "{id,label}:(1,_)";
         let item: Item = decode(input).unwrap();
         assert_eq!(item.id, 1);
         assert_eq!(item.label, None);
+        // A blank position is an error; null is written `_`.
+        assert!(matches!(
+            decode::<Item>("{id,label}:(1,)"),
+            Err(Error::EmptySlot)
+        ));
+        // `null` is not a keyword: it is the string "null".
+        let item: Item = decode("{id,label}:(1,null)").unwrap();
+        assert_eq!(item.label.as_deref(), Some("null"));
     }
 
     #[test]
@@ -353,11 +363,15 @@ mod tests {
 
     #[test]
     fn test_trailing_comma() {
-        // Rows are never null, so a trailing comma after the last row is an
-        // error (SPEC S9), while one inside a tuple is a null slot.
+        // A trailing comma is an error everywhere: after the last row (SPEC
+        // S9) and inside an array or tuple (no blank positions).
         let input = "[{id@int,name@str,active@bool}]:(1,Alice,true),(2,Bob,false),";
         assert!(decode::<Vec<User>>(input).is_err());
-        let v: Vec<Option<i64>> = decode("[1,2,]").unwrap();
+        assert!(matches!(
+            decode::<Vec<Option<i64>>>("[1,2,]"),
+            Err(Error::EmptySlot)
+        ));
+        let v: Vec<Option<i64>> = decode("[1,2,_]").unwrap();
         assert_eq!(v, vec![Some(1), Some(2), None]);
     }
 
@@ -547,8 +561,8 @@ mod tests {
         assert_eq!(r1, r2);
 
         // Test with None values
-        let typed_none = "{id@int,label@str,score@float}:(2,,)";
-        let untyped_none = "{id,label,score}:(2,,)";
+        let typed_none = "{id@int,label@str,score@float}:(2,_,_)";
+        let untyped_none = "{id,label,score}:(2,_,_)";
         let r3: Record = decode(typed_none).unwrap();
         let r4: Record = decode(untyped_none).unwrap();
         assert_eq!(r3, r4);
@@ -732,7 +746,7 @@ mod tests {
         };
         let out2 = encode_typed(&v2).unwrap();
         // None fields don't have type hints since no value is serialized
-        assert_eq!(out2, "{id@int,label,score}:(2,,)");
+        assert_eq!(out2, "{id@int,label,score}:(2,_,_)");
 
         // Both roundtrip correctly
         let v1b: Opt = decode(&out1).unwrap();

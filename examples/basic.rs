@@ -139,7 +139,7 @@ fn main() {
     let item: Item = decode(input).unwrap();
     println!("  with value: {:?}", item);
 
-    let input = "{id,label}:(2,)";
+    let input = "{id,label}:(2,_)";
     let item: Item = decode(input).unwrap();
     println!("  with null:  {:?}", item);
 

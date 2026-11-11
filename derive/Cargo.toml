@@ -1,6 +1,6 @@
 [package]
 name = "asun-derive"
-version = "1.2.0"
+version = "1.2.1"
 authors = ["Athan Xiao <athanxiao@gmail.com>"]
 edition = "2024"
 description = "Derive macros for the asun serialization format (AsunEncode / AsunDecode)"
@@ -12,6 +12,6 @@ rust-version = "1.95"
 proc-macro = true
 
 [dependencies]
-syn = { version = "3.0.4", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

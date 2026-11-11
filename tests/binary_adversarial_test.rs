@@ -377,3 +377,35 @@ fn borrowed_strs_point_into_the_input() {
     assert_eq!(back, v);
     assert!(b.as_ptr_range().contains(&back.s.as_ptr()));
 }
+
+#[derive(Debug, AsunEncode, AsunDecode, PartialEq, Default)]
+struct Maps {
+    by_name: std::collections::BTreeMap<String, Option<i32>>,
+    by_id: std::collections::HashMap<u32, Vec<String>>,
+}
+
+#[test]
+fn maps_roundtrip_and_reject_bad_input() {
+    let mut v = Maps::default();
+    v.by_name.insert("a:b".into(), Some(-1));
+    v.by_name.insert(String::new(), None);
+    v.by_id.insert(7, vec!["x".into(), "_".into()]);
+    v.by_id.insert(0, vec![]);
+    let bin = encode_binary(&v).unwrap();
+    assert_eq!(decode_binary_exact::<Maps>(&bin).unwrap(), v);
+    for n in 0..bin.len() {
+        assert!(decode_binary::<Maps>(&bin[..n]).is_err(), "prefix {n}");
+    }
+
+    // count 2, then the key "k" twice.
+    let dup = [2, 1, b'k', 0, 1, b'k', 0, 0];
+    assert!(matches!(
+        decode_binary::<Maps>(&dup),
+        Err(Error::DuplicateKey)
+    ));
+    let limit = DEFAULT_MAX_SEQUENCE_LEN as u64;
+    assert!(matches!(
+        decode_binary::<Maps>(&varint(limit + 1)),
+        Err(Error::SequenceTooLong)
+    ));
+}

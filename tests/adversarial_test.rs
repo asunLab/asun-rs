@@ -322,10 +322,18 @@ fn strings() {
     r.err::<A>("{a}:(\"a\nb\")"); // raw LF inside a quoted string
     r.err::<A>("{a}:(\"a\u{0}b\")");
 
-    // Escapes.
-    r.ok(r#"{a}:(\,\(\)\[\]\{\}\:\@\\\")"#, a(r#",()[]{}:@\""#));
+    // Escapes exist only inside quotes, and only the JSON ones.
+    r.err::<A>(r#"{a}:(\,\(\)\[\]\{\}\:\@\\\")"#);
+    r.err::<A>(r#"{a}:(a\,b)"#);
+    r.err::<A>(r#"{a}:(a\\b)"#);
+    r.err::<A>(r#"{a}:(\u4e2d\u6587)"#);
+    r.ok(r#"{a}:(",()[]{}:@\\\"")"#, a(r#",()[]{}:@\""#));
+    r.err::<A>(r#"{a}:("\,")"#);
+    r.err::<A>(r#"{a}:("\(\)")"#);
+    r.err::<A>(r#"{a}:("\:\@")"#);
+    r.ok(r#"{a}:("a\/b")"#, a("a/b"));
     r.ok(r#"{a}:("\n\t\r\b\f")"#, a("\n\t\r\u{8}\u{c}"));
-    r.ok(r#"{a}:(\u4e2d\u6587)"#, a("中文"));
+    r.ok(r#"{a}:("\u4e2d\u6587")"#, a("中文"));
     r.ok(r#"{a}:("\u4E2D")"#, a("中"));
     r.ok(r#"{a}:("\uD83D\uDE00")"#, a("😀")); // surrogate pair
     r.err::<A>(r#"{a}:("\uD800")"#); // lone surrogate is not a scalar value
@@ -356,15 +364,34 @@ fn strings() {
     r.ok("{a}:(1e)", a("1e"));
     r.ok("{a}:(123abc)", a("123abc"));
     r.ok("{a}:(a/b*c)", a("a/b*c"));
-    r.err::<A>("{a}:(null)"); // keyword null into a String
+    r.ok("{a}:(null)", a("null")); // `null` is not a keyword
     r.ok(r#"{a}:("null")"#, a("null"));
+    r.err::<A>("{a}:(_)"); // `_` is null, and a String cannot be null
+    r.ok(r#"{a}:("_")"#, a("_"));
+    r.ok("{a}:(_x)", a("_x"));
+    r.ok("{a}:(_ _)", a("_ _"));
     r.ok("{a}:(True)", a("True"));
 
-    // Null vs empty string.
-    r.ok("{a}:()", OA { a: None });
-    r.ok("{a}:(   )", OA { a: None });
+    // Null vs empty string vs blank.
+    r.ok("{a}:(_)", OA { a: None });
+    r.ok("{a}:( _ )", OA { a: None });
+    r.ok("{a}:(_ /* null */)", OA { a: None });
+    r.ok(
+        r#"{a}:("_")"#,
+        OA {
+            a: Some("_".into()),
+        },
+    );
+    r.ok(
+        "{a}:(null)",
+        OA {
+            a: Some("null".into()),
+        },
+    );
     r.ok(r#"{a}:("")"#, OA { a: Some("".into()) });
-    r.err::<A>("{a}:()"); // non-Option String cannot be null
+    r.err::<OA>("{a}:()"); // zero elements for a one-field schema
+    r.err::<OA>("{a}:(   )");
+    r.err::<A>("{a}:()");
 
     r.finish();
 }
@@ -378,7 +405,10 @@ fn numbers() {
     let mut r = Report::new("numbers");
 
     r.ok("{i}:(-0)", I { i: 0 });
-    r.ok("{i}:(007)", I { i: 7 });
+    r.err::<I>("{i}:(007)"); // JSON numbers: no leading zeros
+    r.err::<I>("{i}:(00)");
+    r.err::<I>("{i}:(-01)");
+    r.ok("{i}:(0)", I { i: 0 });
     r.ok("{i}:(  42  )", I { i: 42 });
     r.ok("{i}:(9223372036854775807)", I { i: i64::MAX });
     r.ok("{i}:(-9223372036854775808)", I { i: i64::MIN });
@@ -403,7 +433,11 @@ fn numbers() {
     r.err::<I>("{i}:(42abc)");
     r.err::<I>("{i}:(-)");
     r.err::<I>("{i}:()");
-    r.ok("{i}:()", OI { i: None });
+    r.err::<I>("{i}:(_)");
+    r.err::<I>("{i}:(null)");
+    r.ok("{i}:(_)", OI { i: None });
+    r.err::<OI>("{i}:()");
+    r.err::<OI>("{i}:(null)");
     r.err::<OI>("{i}:(abc)");
 
     r.ok("{f}:(3)", F { f: 3.0 });
@@ -426,6 +460,10 @@ fn numbers() {
     r.err::<F>("{f}:(1.2.3)");
     r.err::<F>("{f}:(1,5)"); // European decimal → 2 elements
     r.err::<F>(r#"{f}:("1.5")"#);
+    r.err::<F>("{f}:(01.5)");
+    r.err::<F>("{f}:(00.5)");
+    r.ok("{f}:(0.5)", F { f: 0.5 });
+    r.ok("{f}:(0e0)", F { f: 0.0 });
 
     r.ok("{b}:(true)", B { b: true });
     r.ok("{b}:( false )", B { b: false });
@@ -439,7 +477,8 @@ fn numbers() {
 
     r.ok("{c}:(x)", C { c: 'x' });
     r.ok("{c}:(赛)", C { c: '赛' });
-    r.ok(r#"{c}:(\,)"#, C { c: ',' });
+    r.err::<C>(r#"{c}:(\,)"#);
+    r.ok(r#"{c}:(",")"#, C { c: ',' });
     r.ok(r#"{c}:(" ")"#, C { c: ' ' });
     r.err::<C>("{c}:(xy)");
     r.err::<C>(r#"{c}:("")"#);
@@ -465,7 +504,14 @@ fn schema() {
     r.ok("{a /* c */ , b /* } ) , */}:(x,1)", sb("x", 1));
     r.ok("{b,a}:(1,x)", sb("x", 1)); // reordered → by name
     r.ok("{a,b,c}:(x,1,zzz)", sb("x", 1)); // unknown extra field skipped
-    r.ok("{a,z,b}:(x,\\),1)", sb("x", 1));
+    r.err::<S>("{a,z,b}:(x,\\),1)"); // no escapes in a skipped plain value either
+    r.err::<S>("{a,z,b}:(x,,1)"); // a skipped field cannot be blank
+    r.err::<S>("{a,z,b}:(x,[1,,2],1)");
+    r.err::<S>("{a,z,b}:(x,[1,],1)");
+    r.err::<S>("{a,z,b}:(x,(,1),1)");
+    r.ok("{a,z,b}:(x,_,1)", sb("x", 1));
+    r.ok("{a,z,b}:(x,[_,()],1)", sb("x", 1));
+    r.ok("{a,m@[str:int],b}:(x,[k:1,\"a:b\":2],1)", sb("x", 1));
     r.ok(r#"{a,z,b}:(x,")(,\"",1)"#, sb("x", 1));
     r.ok("{a,z@{q@[int]},b}:(x,([1,(2)]),1)", sb("x", 1));
     r.ok("{a,z@[{p,q}],b}:(x,[(1,[a,b]),(2,())],1)", sb("x", 1));
@@ -481,6 +527,9 @@ fn schema() {
     r.err::<S>("{a@[,b}:(x,1)");
     r.err::<S>("{a@{,b}:(x,1)");
     r.err::<S>("{a@[]}:([])"); // empty array-type-hint not in grammar
+    r.err::<S>("{a,m@[float:int],b}:(x,[],1)"); // map key type is str or int
+    r.err::<S>("{a,m@[{k}:int],b}:(x,[],1)");
+    r.err::<S>("{a,m@[str:int,b}:(x,[],1)");
     r.err::<S>("{,a,b}:(x,1)");
     r.err::<S>("{a,,b}:(x,1)");
     r.ok("{}:()", sb("", 0)); // missing target fields default
@@ -542,7 +591,8 @@ fn tuples_and_comments() {
     r.err::<S>("{a,b}:( x , 1 , )");
     r.err::<S>("{a,b}:(x,1,,)"); // S5: 3 elements
     r.err::<S>("{a,b}:(x)");
-    r.err::<S>("{a,b}:(x,)"); // b = null into i64
+    r.err::<S>("{a,b}:(x,)"); // blank position
+    r.err::<S>("{a,b}:(x,_)"); // b = null into i64
     r.err::<S>("{a,b}:(x,1,2)");
     r.err::<S>("{a,b}:(,x,1)");
     r.err::<S>("{a,b}:(x,1");
@@ -598,12 +648,17 @@ fn arrays_and_nesting() {
     r.ok("{v@[int]}:([   ])", V { v: vec![] });
     r.ok("{v}:([1,2])", V { v: vec![1, 2] }); // binding omitted
     r.err::<V>("{v@[int]}:([1,,3])");
+    r.err::<VO>("{v@[int]}:([1,,3])");
     r.ok(
-        "{v@[int]}:([1,,3])",
+        "{v@[int]}:([1,_,3])",
         VO {
             v: vec![Some(1), None, Some(3)],
         },
     );
+    r.ok("{v}:([_])", VO { v: vec![None] });
+    r.err::<VO>("{v}:([,])");
+    r.err::<VO>("{v}:([,1])");
+    r.err::<VO>("{v}:([null])"); // the string "null" is not an i64
     r.err::<V>("{v@[int]}:([1,2,,])"); // S5 also applies to arrays → [1,2,null]
     r.err::<V>("{v@[int]}:([1,2)");
     r.err::<V>("{v@[int]}:([1,2]]");
@@ -613,8 +668,9 @@ fn arrays_and_nesting() {
     r.err::<V>("{v@[int]}:([1,[2]])");
     r.err::<V>("{v@[int]}:([1 2])");
     r.ok("{v@[int]}:([/* c */1])", V { v: vec![1] });
+    r.err::<VS>(r#"{v@[str]}:([a\,b])"#);
     r.ok(
-        r#"{v@[str]}:([a\,b,"c,d",\],""])"#,
+        r#"{v@[str]}:(["a,b","c,d","]",""])"#,
         VS {
             v: vec!["a,b".into(), "c,d".into(), "]".into(), "".into()],
         },
@@ -646,7 +702,8 @@ fn arrays_and_nesting() {
         },
     ); // nested reorder
     r.err::<ON>("{n@{x,y}}:(())"); // empty tuple for a 2-field schema
-    r.ok("{n@{x,y}}:()", ON { n: None });
+    r.ok("{n@{x,y}}:(_)", ON { n: None });
+    r.err::<ON>("{n@{x,y}}:()");
     r.err::<N>("{n@{x,y}}:((1,2,3))");
     r.err::<N>("{n@{x,y}}:((1))");
     r.err::<N>("{n@{x,y}}:([1,2])");
@@ -715,14 +772,18 @@ fn hostile_inputs() {
     let many_fields = format!(
         "{{a,{}b}}:(x,{}1)",
         (0..50_000).map(|i| format!("f{i},")).collect::<String>(),
-        ",".repeat(50_000)
+        "_,".repeat(50_000)
     );
     r.ok(&many_fields, sb("x", 1));
     let big_str = "y".repeat(5_000_000);
     r.ok(&format!("{{a}}:({big_str})"), a(&big_str));
     let backslashes = "\\\\".repeat(100_000);
-    r.ok(&format!("{{a}}:({backslashes})"), a(&"\\".repeat(100_000)));
-    r.err::<A>(&format!("{{a}}:({}\\)", "\\\\".repeat(1000)));
+    r.ok(
+        &format!("{{a}}:(\"{backslashes}\")"),
+        a(&"\\".repeat(100_000)),
+    );
+    r.err::<A>(&format!("{{a}}:({backslashes})")); // no escapes outside quotes
+    r.err::<A>(&format!("{{a}}:(\"{}\\)", "\\\\".repeat(1000)));
     // Truncate a valid document at every byte: never panic.
     let doc = r#"[{a,z@{p@[{q,r}]},b}]:(x,([(1,"a\"b"),(2,[c])]),1),(y,(),2)"#;
     for cut in 0..doc.len() {
@@ -764,6 +825,8 @@ fn encode_roundtrip() {
         "- 5",
         ".5",
         "null",
+        "_",
+        "_x",
         "a,b",
         "(",
         ")",
@@ -796,6 +859,7 @@ fn encode_roundtrip() {
         "[{a}]:(b),(c)",
         "\"quoted\"",
         "trailing\\",
+        "a\\,b",
         "http://x.com/?a=1&b=(2)",
         "e@mail.com",
         "#tag",
@@ -923,6 +987,176 @@ fn encode_roundtrip() {
         b: "b".into(),
         c: Some((Some(Ev::Rec { k: 1 }), "t".into())),
     });
+    r.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 8. Maps (SPEC S11)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, AsunEncode, AsunDecode)]
+struct M {
+    m: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, PartialEq, AsunEncode, AsunDecode)]
+struct MS {
+    m: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, PartialEq, AsunEncode, AsunDecode)]
+struct MI {
+    m: std::collections::BTreeMap<i64, String>,
+}
+
+#[derive(Debug, PartialEq, AsunEncode, AsunDecode)]
+struct MO {
+    m: Option<std::collections::BTreeMap<String, Option<i64>>>,
+}
+
+#[derive(Debug, PartialEq, AsunEncode, AsunDecode)]
+struct MP {
+    m: std::collections::BTreeMap<String, P>,
+}
+
+fn map<K: Ord, V>(entries: impl IntoIterator<Item = (K, V)>) -> std::collections::BTreeMap<K, V> {
+    entries.into_iter().collect()
+}
+
+#[test]
+fn maps() {
+    let mut r = Report::new("maps");
+
+    let m = |e: &[(&str, i64)]| M {
+        m: map(e.iter().map(|(k, v)| (k.to_string(), *v))),
+    };
+    r.ok(
+        "{m@[str:int]}:([age:30,score:95])",
+        m(&[("age", 30), ("score", 95)]),
+    );
+    r.ok("{m@[str:int]}:([])", m(&[]));
+    r.ok("{m@[str:int]}:([ ])", m(&[]));
+    r.ok(
+        "{m@[str:int]}:([ age : 30 , score:95 ])",
+        m(&[("age", 30), ("score", 95)]),
+    );
+    r.ok("{m@[:]}:([a:1])", m(&[("a", 1)]));
+    r.ok("{m@[:int]}:([a:1])", m(&[("a", 1)]));
+    r.ok("{m@[str:]}:([a:1])", m(&[("a", 1)]));
+    r.ok("{m}:([a:1])", m(&[("a", 1)])); // binding omitted: typed target
+    r.ok("{m@[str:int]}:([New York:8])", m(&[("New York", 8)]));
+    r.ok(
+        r#"{m@[str:int]}:(["12:30":1,"a,b":2])"#,
+        m(&[("12:30", 1), ("a,b", 2)]),
+    );
+    r.ok(
+        "{m@[str:int]}:([1:10,007:20])",
+        m(&[("1", 10), ("007", 20)]),
+    );
+    r.ok("{m@[:]}:([1:10])", m(&[("1", 10)])); // untyped integer key → text
+    r.ok("{m@[str:int]}:([a /* k */ : /* v */ 1])", m(&[("a", 1)]));
+    r.ok(
+        "{m@[str:str]}:([start:12:30,url:https://a.com])",
+        MS {
+            m: map([
+                ("start".into(), "12:30".into()),
+                ("url".into(), "https://a.com".into()),
+            ]),
+        },
+    );
+    r.ok(
+        "{m@[int:str]}:([1:one,-2:minus two])",
+        MI {
+            m: map([(1, "one".into()), (-2, "minus two".into())]),
+        },
+    );
+    r.ok(
+        "{m@[str:int]}:([a:_,b:2])",
+        MO {
+            m: Some(map([("a".into(), None), ("b".into(), Some(2))])),
+        },
+    );
+    r.ok("{m@[str:int]}:(_)", MO { m: None });
+    r.ok(
+        "{m@[str:{x,y}]}:([a:(1,2),b:(3,4)])",
+        MP {
+            m: map([
+                ("a".into(), P { x: 1, y: 2 }),
+                ("b".into(), P { x: 3, y: 4 }),
+            ]),
+        },
+    );
+    r.ok(
+        "{m@[str:{y,x}]}:([a:(2,1)])", // value schema reordered → by name
+        MP {
+            m: map([("a".into(), P { x: 1, y: 2 })]),
+        },
+    );
+
+    r.err::<M>("{m@[str:int]}:([a:1,a:2])"); // duplicate key
+    r.err::<M>(r#"{m@[str:int]}:([1:1,"1":2])"#); // same str key
+    r.err::<M>("{m@[str:int]}:([_:1])");
+    r.err::<M>("{m@[:]}:([true:1])");
+    r.err::<M>("{m@[:]}:([1.5:1])");
+    r.ok("{m@[str:int]}:([true:1])", m(&[("true", 1)])); // @str: token text
+    r.err::<MI>("{m@[int:str]}:([a:x])");
+    r.err::<MI>("{m@[str:str]}:([1:x])"); // key hint contradicts i64 keys
+    r.err::<MI>("{m@[int:str]}:([01:x])");
+    r.err::<M>("{m@[str:int]}:([a:x])");
+    r.err::<M>("{m@[str:int]}:([1,2])"); // entries need key:value
+    r.err::<M>("{m@[str:int]}:([a:1,,b:2])");
+    r.err::<M>("{m@[str:int]}:([a:1,])");
+    r.err::<M>("{m@[str:int]}:([,a:1])");
+    r.err::<M>("{m@[str:int]}:([a:])");
+    r.err::<M>("{m@[str:int]}:([:1])");
+    r.err::<M>("{m@[str:int]}:([a\\:b:1])");
+    r.err::<M>("{m@[str:int]}:([a:1)");
+    r.err::<M>("{m@[str:int]}:((a:1))");
+    r.err::<M>("{m@[int]}:([a:1])"); // array binding, map target
+    r.err::<V>("{v@[str:int]}:([a:1])"); // map binding, array target
+
+    r.roundtrip(m(&[]));
+    r.roundtrip(m(&[
+        ("a", 1),
+        ("b c", -2),
+        ("12:30", 3),
+        ("", 4),
+        ("_", 5),
+        ("1", 6),
+    ]));
+    r.roundtrip(m(&[
+        ("true", 1),
+        ("x,y", 2),
+        ("\"q\"", 3),
+        (" pad ", 4),
+        ("a/*b", 5),
+    ]));
+    r.roundtrip(MI {
+        m: map([
+            (i64::MIN, ":".into()),
+            (0, "_".into()),
+            (i64::MAX, "".into()),
+        ]),
+    });
+    r.roundtrip(MO { m: None });
+    r.roundtrip(MO {
+        m: Some(map([("a".into(), None), ("b".into(), Some(1))])),
+    });
+    r.roundtrip(MP {
+        m: map([
+            ("a".into(), P { x: 1, y: 2 }),
+            ("b".into(), P { x: 3, y: 4 }),
+        ]),
+    });
+    r.roundtrip(vec![
+        MP {
+            m: map([("a".into(), P { x: 1, y: 2 })]),
+        },
+        MP { m: map([]) },
+    ]);
+    let top: std::collections::BTreeMap<String, i64> = map([("a".into(), 1)]);
+    r.encode_err(top); // a map is never a top-level value
+
     r.finish();
 }
 

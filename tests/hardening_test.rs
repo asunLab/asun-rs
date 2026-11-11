@@ -130,14 +130,17 @@ fn realistic_nesting_still_works() {
 /// code point, which mangled every multi-byte character in a value that also
 /// contained an escape.
 #[test]
-fn plain_value_escape_preserves_utf8() {
-    let v: S = decode("{a,b}:(你好\\,世界,1)").unwrap();
+fn plain_value_backslash_is_an_error() {
+    // Plain strings have no escapes: quote values with structural characters.
+    assert!(decode::<S>("{a,b}:(你好\\,世界,1)").is_err());
+    assert!(decode::<S>("{a,b}:(日本語\\:テスト\\(x\\),9)").is_err());
+    let v: S = decode(r#"{a,b}:("你好,世界",1)"#).unwrap();
     assert_eq!(v.a, "你好,世界");
 }
 
 #[test]
-fn plain_value_escape_preserves_utf8_mixed() {
-    let v: S = decode("{a,b}:(日本語\\:テスト\\(x\\),9)").unwrap();
+fn quoted_value_preserves_utf8_with_structural_chars() {
+    let v: S = decode(r#"{a,b}:("日本語:テスト(x)",9)"#).unwrap();
     assert_eq!(v.a, "日本語:テスト(x)");
     assert_eq!(v.b, 9);
 }
@@ -460,23 +463,191 @@ fn f32_is_rounded_once() {
     assert_eq!(got.to_bits(), want.to_bits());
 }
 
-/// `null x` is a plain string (S2: only exactly `null` is the keyword). An
-/// `Option<String>` holding it is encoded bare and used to fail to decode.
+/// `_ x` is a plain string (S2: only exactly `_` is null), and `null` is an
+/// ordinary string. Both are encoded bare.
 #[test]
-fn null_prefixed_plain_string_round_trips() {
+fn underscore_prefixed_plain_string_round_trips() {
     #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
     struct O {
         s: Option<String>,
         n: Option<String>,
+        w: Option<String>,
     }
     let v = O {
-        s: Some("null x".into()),
+        s: Some("_ x".into()),
         n: None,
+        w: Some("null".into()),
     };
     let text = encode(&v).unwrap();
-    assert_eq!(text, "{s,n}:(null x,)");
+    assert_eq!(text, "{s,n,w}:(_ x,_,null)");
     assert_eq!(decode::<O>(&text).unwrap(), v);
-    // The keyword itself, with trailing layout, is still null.
-    let o: O = decode("{s,n}:(null /* c */ , null )").unwrap();
-    assert_eq!(o, O { s: None, n: None });
+    // `_` with trailing layout is still null; the string "_" is quoted.
+    let o: O = decode("{s,n,w}:(_ /* c */ , _ ,\"_\")").unwrap();
+    assert_eq!(
+        o,
+        O {
+            s: None,
+            n: None,
+            w: Some("_".into())
+        }
+    );
+    assert_eq!(
+        encode(&O {
+            s: Some("_".into()),
+            n: None,
+            w: None
+        })
+        .unwrap(),
+        "{s,n,w}:(\"_\",_,_)"
+    );
+}
+
+/// The exact float fast path (mantissa ≤ 2^53, |exp| ≤ 22, leading zeros not
+/// counted) must agree bit for bit with `str::parse` for f64 and f32.
+#[test]
+fn float_decode_matches_std_parse() {
+    #[derive(AsunDecode)]
+    struct D {
+        v: f64,
+    }
+    #[derive(AsunDecode)]
+    struct F {
+        v: f32,
+    }
+    fn check(t: &str) {
+        let d: f64 = t.parse().unwrap();
+        if d.is_finite() {
+            let got = asun::decode::<D>(&format!("{{v}}:({t})")).unwrap().v;
+            assert_eq!(got.to_bits(), d.to_bits(), "f64 {t}");
+        }
+        let f: f32 = t.parse().unwrap();
+        if f.is_finite() {
+            let got = asun::decode::<F>(&format!("{{v}}:({t})")).unwrap().v;
+            assert_eq!(got.to_bits(), f.to_bits(), "f32 {t}");
+        }
+    }
+    for t in [
+        "0.3333333333333333",
+        "9007199254740992",
+        "9007199254740993",
+        "9007199254740993.0",
+        "0.00019996000799840033",
+        "0.000123456789",
+        "-0.0",
+        "1e22",
+        "1e23",
+        "123456789012345678.0",
+        "0.0000000000000000000001",
+        "16777217.0",
+        "8388609.5",
+    ] {
+        check(t);
+    }
+    // xorshift64: random bit patterns plus random decimal literals.
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    for _ in 0..30_000 {
+        let x = f64::from_bits(next());
+        if x.is_finite() {
+            check(&format!("{x}"));
+            check(&format!("{x:e}"));
+        }
+        let y = f32::from_bits(next() as u32);
+        if y.is_finite() {
+            check(&format!("{y}"));
+        }
+        let n = 1 + (next() % 20) as usize;
+        let mut digits: String = (0..n)
+            .map(|_| (b'0' + (next() % 10) as u8) as char)
+            .collect();
+        if n > 1 && digits.starts_with('0') {
+            digits.replace_range(0..1, "0.");
+        }
+        if next() % 3 == 0 {
+            digits.push_str(&format!("e{}", (next() % 60) as i64 - 30));
+        }
+        check(&digits);
+    }
+}
+
+/// `Cow<'de, str>` borrows from the input unless a quoted string has escapes,
+/// in text, binary and map keys; it encodes exactly like `String`.
+#[test]
+fn cow_str_borrows_unless_escaped() {
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
+    struct C<'a> {
+        a: Cow<'a, str>,
+        b: Option<Cow<'a, str>>,
+        v: Vec<Cow<'a, str>>,
+        m: BTreeMap<Cow<'a, str>, Cow<'a, str>>,
+    }
+    #[derive(Debug, AsunEncode, AsunDecode, PartialEq)]
+    struct S {
+        a: String,
+        b: Option<String>,
+        v: Vec<String>,
+        m: BTreeMap<String, String>,
+    }
+    // Checks the variant, so it needs the `Cow` itself, not a `&str`.
+    #[allow(clippy::ptr_arg)]
+    fn borrowed(c: &Cow<str>) -> bool {
+        matches!(c, Cow::Borrowed(_))
+    }
+
+    let input = r#"{a,b,v,m}:(hello world,"quoted",[x,"y z"],[k:v,"a:b":"c"])"#;
+    let c: C = decode(input).unwrap();
+    assert_eq!(c.a, "hello world");
+    assert_eq!(c.b.as_deref(), Some("quoted"));
+    assert!(borrowed(&c.a) && borrowed(c.b.as_ref().unwrap()));
+    assert!(c.v.iter().all(borrowed));
+    assert!(c.m.iter().all(|(k, v)| borrowed(k) && borrowed(v)));
+    assert_eq!(c.m.get("a:b").map(|v| &**v), Some("c"));
+
+    // Escapes force an owned buffer; `&str` cannot do this at all.
+    let c: C = decode(r#"{a,b,v,m}:("a\nb",_,["é"],["k\"":"v\\"])"#).unwrap();
+    assert_eq!(c.a, "a\nb");
+    assert!(!borrowed(&c.a) && c.b.is_none());
+    assert_eq!(c.v, ["é"]);
+    let (k, v) = c.m.iter().next().unwrap();
+    assert_eq!((&**k, &**v), ("k\"", "v\\"));
+    assert!(!borrowed(k) && !borrowed(v));
+
+    // `_` is null, so it is not a string; blanks are errors.
+    assert!(matches!(
+        decode::<C>("{a,b,v,m}:(_,_,[],[])"),
+        Err(Error::NullNotAllowed)
+    ));
+    assert!(decode::<C>("{a,b,v,m}:(x,,[],[])").is_err());
+
+    // Encoding matches `String`, plain and typed, and round-trips.
+    let s = S {
+        a: "_".into(),
+        b: Some("a\nb".into()),
+        v: vec!["true".into(), "x".into()],
+        m: BTreeMap::from([("k:1".into(), "007".into())]),
+    };
+    let text = encode(&s).unwrap();
+    let c: C = decode(&text).unwrap();
+    assert_eq!(encode(&c).unwrap(), text);
+    assert_eq!(
+        asun::encode_typed(&c).unwrap(),
+        asun::encode_typed(&s).unwrap()
+    );
+    assert_eq!(decode::<S>(&asun::encode_typed(&c).unwrap()).unwrap(), s);
+
+    // Binary strings have no escapes: always borrowed.
+    let bin = asun::encode_binary(&s).unwrap();
+    let c: C = asun::decode_binary_exact(&bin).unwrap();
+    assert_eq!(c.b.as_deref(), Some("a\nb"));
+    assert!(borrowed(&c.a) && borrowed(c.b.as_ref().unwrap()));
+    assert!(c.m.iter().all(|(k, v)| borrowed(k) && borrowed(v)));
+    assert_eq!(asun::encode_binary(&c).unwrap(), bin);
 }

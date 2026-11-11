@@ -11,7 +11,7 @@
 
 use crate::error::{Error, Result};
 use crate::simd;
-use crate::traits::AsunEncode;
+use crate::traits::{AsunEncode, AsunMapKey};
 
 // ---------------------------------------------------------------------------
 // Stack-based number formatting (no heap allocation)
@@ -173,7 +173,7 @@ fn prepend(buf: &mut Vec<u8>, header: &[u8]) {
 /// A plain string (GRAMMAR.abnf `plain-string`) may contain anything except
 /// `, ( ) [ ] { } " \`, control characters and the sequence `/*`; it must not
 /// start or end with whitespace, and it must not read back as another type
-/// (`true`, `false`, `null`, a number). Interior spaces, `@`, `:`, `/` and `*`
+/// (`true`, `false`, `_`, a number). Interior spaces, `@`, `:`, `/` and `*`
 /// stay bare, which is where most of the token savings over quoting come from.
 #[inline]
 fn quote_scan(s: &str) -> Option<usize> {
@@ -216,9 +216,11 @@ fn quote_scan(s: &str) -> Option<usize> {
         // Leading whitespace would be trimmed.
         b' ' => return Some(len),
         // Keyword lookalikes (keywords are case-sensitive).
-        b't' | b'f' | b'n' => {
-            return matches!(bytes, b"true" | b"false" | b"null").then_some(len);
+        b't' | b'f' => {
+            return matches!(bytes, b"true" | b"false").then_some(len);
         }
+        // `_` alone is null.
+        b'_' => return (len == 1).then_some(len),
         // A leading U+FEFF at the start of a document would be skipped as a BOM.
         0xEF => return bytes.starts_with("\u{FEFF}".as_bytes()).then_some(len),
         _ => return None,
@@ -301,10 +303,9 @@ pub struct Encoder {
     /// only a struct that *is* a row (not one nested deeper, as in
     /// `Vec<Vec<T>>`) captures the shared `[{schema}]:` header.
     top_seq_direct: bool,
-    /// Start offsets of the open `[`-tuples (Rust tuples, tuple structs) and
-    /// how many elements each has written, so a lone null element can be
-    /// spelled `[null]` instead of the empty array `[]`.
-    tuple_frames: Vec<(usize, u32)>,
+    /// Element counts of the open `[`-tuples (Rust tuples, tuple structs), so
+    /// each element after the first is preceded by `,`.
+    tuple_frames: Vec<u32>,
 }
 
 /// Serialize a value to an ASUN text string with a plain schema.
@@ -399,12 +400,8 @@ impl Encoder {
         }
     }
 
-    /// Take the finished document. A top-level null writes nothing into its
-    /// (absent) slot, and an empty document is invalid, so spell it `null`.
-    pub(crate) fn finish(mut self) -> String {
-        if self.buf.is_empty() {
-            self.buf.extend_from_slice(b"null");
-        }
+    /// Take the finished document.
+    pub(crate) fn finish(self) -> String {
         unsafe { String::from_utf8_unchecked(self.buf) }
     }
 
@@ -552,6 +549,7 @@ impl Encoder {
     pub fn encode_none(&mut self) -> Result<()> {
         self.push_separator();
         // For typed mode: None doesn't set a type hint (the Some branch will)
+        self.buf.push(b'_');
         Ok(())
     }
 
@@ -560,11 +558,12 @@ impl Encoder {
         value.encode(self)
     }
 
-    /// Encode `()` / a unit struct. Like JSON, unit carries no data: it is a
-    /// null (an empty slot, or `null` at the top level).
+    /// Encode `()` / a unit struct. Like JSON, unit carries no data: it is
+    /// null, `_`.
     #[inline]
     pub fn encode_unit(&mut self) -> Result<()> {
         self.push_separator();
+        self.buf.push(b'_');
         Ok(())
     }
 
@@ -673,7 +672,6 @@ impl Encoder {
                 is_top_seq: true,
                 cached_nested_schema: None,
                 skip_was_set: false,
-                data_start: self.buf.len(),
                 has_null: false,
                 header_done: false,
             })
@@ -689,7 +687,6 @@ impl Encoder {
                 is_top_seq: false,
                 cached_nested_schema: None,
                 skip_was_set: false,
-                data_start: self.buf.len(),
                 has_null: false,
                 header_done: false,
             })
@@ -706,18 +703,18 @@ impl Encoder {
         self.buf.push(b'[');
         self.in_tuple = true;
         self.first = true;
-        self.tuple_frames.push((self.buf.len(), 0));
+        self.tuple_frames.push(0);
         Ok(())
     }
 
     /// Encode one tuple element.
     #[inline]
     pub fn tuple_element<T: AsunEncode + ?Sized>(&mut self, value: &T) -> Result<()> {
-        if let Some(frame) = self.tuple_frames.last_mut() {
-            if frame.1 > 0 {
+        if let Some(count) = self.tuple_frames.last_mut() {
+            if *count > 0 {
                 self.buf.push(b',');
             }
-            frame.1 += 1;
+            *count += 1;
         }
         self.first = true;
         self.in_tuple = true;
@@ -727,13 +724,7 @@ impl Encoder {
     /// Close a tuple `]`.
     #[inline]
     pub fn end_tuple(&mut self) -> Result<()> {
-        if let Some((start, count)) = self.tuple_frames.pop()
-            && count == 1
-            && self.buf.len() == start
-        {
-            // `[]` is the empty array; a single null element must be explicit.
-            self.buf.extend_from_slice(b"null");
-        }
+        self.tuple_frames.pop();
         self.buf.push(b']');
         self.first = false;
         // A tuple is a heterogeneous array: its binding is the untyped `@[]`.
@@ -752,6 +743,93 @@ impl Encoder {
         self.in_tuple = true;
         self.top_seq_direct = false;
         Ok(TupleEncoder { first: false })
+    }
+
+    /// Encode a map as `[key:value,...]` (SPEC S11) and bubble up its
+    /// `[K:V]` binding: the key type in typed mode, and the value binding taken
+    /// from the first entry that produced one. A map has no top-level form.
+    pub fn encode_map<'a, K, V, I>(&mut self, len: usize, entries: I) -> Result<()>
+    where
+        K: AsunMapKey + ?Sized + 'a,
+        V: AsunEncode + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a K, &'a V)>,
+    {
+        if !self.in_tuple {
+            return Err(Error::msg(
+                "a map cannot be a top-level ASUN value; wrap it in a struct",
+            ));
+        }
+        self.top_seq_direct = false;
+        self.reserve_for_seq(len, false);
+        self.push_separator();
+        self.buf.push(b'[');
+        // Rows 2+ of a homogeneous Vec<Struct> discard any binding we build.
+        let capture = !self.skip_schema_capture;
+        let mut value_binding: Option<Vec<u8>> = None;
+        let mut skip_was_set = false;
+        let mut first = true;
+        for (key, value) in entries {
+            if !first {
+                self.buf.push(b',');
+            }
+            first = false;
+            self.first = true;
+            key.encode_key(self)?;
+            self.buf.push(b':');
+            self.first = true;
+            self.current_type_hint = None;
+            self.nested_schema = None;
+            value.encode(&mut *self)?;
+            if capture && value_binding.is_none() {
+                if let Some(schema) = self.nested_schema.take() {
+                    value_binding = Some(schema);
+                    // Later values share the binding: skip their capture.
+                    if !self.skip_schema_capture {
+                        self.skip_schema_capture = true;
+                        skip_was_set = true;
+                    }
+                } else if let Some(hint) = self.current_type_hint.take() {
+                    value_binding = Some(hint.as_bytes().to_vec());
+                }
+            }
+            self.current_type_hint = None;
+            self.nested_schema = None;
+        }
+        if skip_was_set {
+            self.skip_schema_capture = false;
+        }
+        self.buf.push(b']');
+        self.first = false;
+        if capture {
+            let value_binding = value_binding.unwrap_or_default();
+            let mut binding = Vec::with_capacity(value_binding.len() + 6);
+            binding.push(b'[');
+            if self.typed {
+                binding.extend_from_slice(K::KEY_TYPE.as_bytes());
+            }
+            binding.push(b':');
+            binding.extend_from_slice(&value_binding);
+            binding.push(b']');
+            self.nested_schema = Some(binding);
+        }
+        Ok(())
+    }
+
+    /// Encode a string map key: like a string value, but a `:` (which would
+    /// end a plain key) also forces quotes.
+    #[inline]
+    pub fn encode_map_key_str(&mut self, key: &str) -> Result<()> {
+        self.push_separator();
+        match quote_scan(key) {
+            Some(first_escape) => {
+                simd::simd_write_escaped_from(&mut self.buf, key.as_bytes(), first_escape)
+            }
+            None if key.as_bytes().contains(&b':') => {
+                simd::simd_write_escaped(&mut self.buf, key.as_bytes())
+            }
+            None => simd::push_bytes(&mut self.buf, key.as_bytes()),
+        }
+        Ok(())
     }
 
     /// Begin a struct. Mirrors the previous `serialize_struct`.
@@ -824,11 +902,9 @@ pub struct SeqEncoder {
     /// when an outer seq owns the flag (e.g. inner primitive `Vec<i64>`
     /// running while the outer `Vec<Struct>` is still iterating).
     skip_was_set: bool,
-    /// Buffer offset where this sequence's elements start.
-    data_start: usize,
     /// Top-level `Vec<Struct>`: the `{schema}]:` header has been inserted.
     header_done: bool,
-    /// An element wrote nothing (a null). Rows of `[{schema}]:` can't be null.
+    /// An element was null (`_`). Rows of `[{schema}]:` can't be null.
     has_null: bool,
 }
 
@@ -848,7 +924,7 @@ impl SeqEncoder {
             enc.top_seq_direct = true;
             let r = value.encode(&mut *enc);
             enc.top_seq_direct = false;
-            self.has_null |= enc.buf.len() == before;
+            self.has_null |= enc.buf.len() == before + 1 && enc.buf[before] == b'_';
             r
         } else {
             value.encode(&mut *enc)
@@ -893,17 +969,11 @@ impl SeqEncoder {
         if let Some(cached) = self.cached_nested_schema.take() {
             enc.nested_schema = Some(cached);
         }
-        // `[]` is the empty array; a single null element must be explicit.
-        // One element that wrote nothing (2+ elements always wrote a comma).
-        let lone_null = !self.first && enc.buf.len() == self.data_start;
         if self.is_top_seq {
             if enc.top_seq_fields.is_some() && self.has_null {
                 return Err(Error::msg(
                     "cannot encode a null row in a [{schema}]: sequence",
                 ));
-            }
-            if lone_null {
-                enc.buf.extend_from_slice(b"null");
             }
             if !self.header_done {
                 // Non-struct elements (primitive Vec): `[` is already written.
@@ -911,9 +981,6 @@ impl SeqEncoder {
             }
             enc.in_top_seq = false;
         } else {
-            if lone_null {
-                enc.buf.extend_from_slice(b"null");
-            }
             enc.buf.push(b']');
             // The schema-fragment bubble-up below feeds the parent struct's
             // schema header. When the encoder is in skip-schema mode (rows

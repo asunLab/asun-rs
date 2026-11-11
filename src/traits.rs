@@ -9,8 +9,12 @@
 //! visitor-based design and free of dynamic dispatch.
 //!
 //! Blanket impls are provided for the common standard types (integers, floats,
-//! `bool`, `char`, `String`/`&str`, `Option`, `Vec`, tuples, …), so most types
-//! compose without any manual impls.
+//! `bool`, `char`, `String`/`&str`, `Option`, `Vec`, `HashMap`/`BTreeMap`,
+//! tuples, …), so most types compose without any manual impls.
+
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{BuildHasher, Hash};
 
 use crate::binary::{BinaryDecoder, BinaryEncoder};
 use crate::decode::Decoder;
@@ -88,6 +92,13 @@ impl AsunEncode for str {
 }
 
 impl AsunEncode for String {
+    #[inline]
+    fn encode(&self, enc: &mut Encoder) -> Result<()> {
+        enc.encode_str(self)
+    }
+}
+
+impl AsunEncode for Cow<'_, str> {
     #[inline]
     fn encode(&self, enc: &mut Encoder) -> Result<()> {
         enc.encode_str(self)
@@ -181,6 +192,15 @@ impl<'de> AsunDecode<'de> for &'de str {
     }
 }
 
+/// Zero-copy unless the value is a quoted string with escapes, which is
+/// unescaped into an owned buffer (`&str` returns an error there instead).
+impl<'de> AsunDecode<'de> for Cow<'de, str> {
+    #[inline]
+    fn decode(dec: &mut Decoder<'de>) -> Result<Self> {
+        dec.decode_cow_str()
+    }
+}
+
 impl<'de, T: AsunDecode<'de>> AsunDecode<'de> for Option<T> {
     #[inline]
     fn decode(dec: &mut Decoder<'de>) -> Result<Self> {
@@ -238,6 +258,13 @@ impl AsunEncodeBinary for str {
 }
 
 impl AsunEncodeBinary for String {
+    #[inline]
+    fn encode_binary(&self, enc: &mut BinaryEncoder) -> Result<()> {
+        enc.write_str(self)
+    }
+}
+
+impl AsunEncodeBinary for Cow<'_, str> {
     #[inline]
     fn encode_binary(&self, enc: &mut BinaryEncoder) -> Result<()> {
         enc.write_str(self)
@@ -334,6 +361,14 @@ impl<'de> AsunDecodeBinary<'de> for &'de str {
     }
 }
 
+/// Binary strings carry no escapes, so this always borrows.
+impl<'de> AsunDecodeBinary<'de> for Cow<'de, str> {
+    #[inline]
+    fn decode_binary(dec: &mut BinaryDecoder<'de>) -> Result<Self> {
+        dec.read_str_zerocopy().map(Cow::Borrowed)
+    }
+}
+
 impl<'de, T: AsunDecodeBinary<'de>> AsunDecodeBinary<'de> for Option<T> {
     #[inline]
     fn decode_binary(dec: &mut BinaryDecoder<'de>) -> Result<Self> {
@@ -416,4 +451,192 @@ tuple_impls! {
     10 => (0 T0, 1 T1, 2 T2, 3 T3, 4 T4, 5 T5, 6 T6, 7 T7, 8 T8, 9 T9),
     11 => (0 T0, 1 T1, 2 T2, 3 T3, 4 T4, 5 T5, 6 T6, 7 T7, 8 T8, 9 T9, 10 T10),
     12 => (0 T0, 1 T1, 2 T2, 3 T3, 4 T4, 5 T5, 6 T6, 7 T7, 8 T8, 9 T9, 10 T10, 11 T11),
+}
+
+// ---------------------------------------------------------------------------
+// Maps
+// ---------------------------------------------------------------------------
+
+/// A type usable as a map key. ASUN map keys are strings or integers
+/// (SPEC S11), so this is implemented for `String`, `str` and the integer
+/// types only.
+pub trait AsunMapKey {
+    /// The key type written in a typed schema: `"str"` or `"int"`.
+    const KEY_TYPE: &'static str;
+    /// Write `self` as a map key.
+    fn encode_key(&self, enc: &mut Encoder) -> Result<()>;
+}
+
+/// A map key that can be decoded from the asun text format.
+pub trait AsunDecodeMapKey<'de>: Sized {
+    /// Read a map key (up to, not including, its `:`).
+    fn decode_key(dec: &mut Decoder<'de>) -> Result<Self>;
+}
+
+impl AsunMapKey for str {
+    const KEY_TYPE: &'static str = "str";
+    #[inline]
+    fn encode_key(&self, enc: &mut Encoder) -> Result<()> {
+        enc.encode_map_key_str(self)
+    }
+}
+
+impl AsunMapKey for String {
+    const KEY_TYPE: &'static str = "str";
+    #[inline]
+    fn encode_key(&self, enc: &mut Encoder) -> Result<()> {
+        enc.encode_map_key_str(self)
+    }
+}
+
+impl AsunMapKey for Cow<'_, str> {
+    const KEY_TYPE: &'static str = "str";
+    #[inline]
+    fn encode_key(&self, enc: &mut Encoder) -> Result<()> {
+        enc.encode_map_key_str(self)
+    }
+}
+
+impl<T: AsunMapKey + ?Sized> AsunMapKey for &T {
+    const KEY_TYPE: &'static str = T::KEY_TYPE;
+    #[inline]
+    fn encode_key(&self, enc: &mut Encoder) -> Result<()> {
+        (**self).encode_key(enc)
+    }
+}
+
+impl<'de> AsunDecodeMapKey<'de> for String {
+    #[inline]
+    fn decode_key(dec: &mut Decoder<'de>) -> Result<Self> {
+        dec.decode_map_key_string()
+    }
+}
+
+impl<'de> AsunDecodeMapKey<'de> for &'de str {
+    #[inline]
+    fn decode_key(dec: &mut Decoder<'de>) -> Result<Self> {
+        dec.decode_map_key_borrowed_str()
+    }
+}
+
+impl<'de> AsunDecodeMapKey<'de> for Cow<'de, str> {
+    #[inline]
+    fn decode_key(dec: &mut Decoder<'de>) -> Result<Self> {
+        dec.decode_map_key_cow_str()
+    }
+}
+
+macro_rules! int_map_key {
+    ($($ty:ty),+) => {
+        $(
+            impl AsunMapKey for $ty {
+                const KEY_TYPE: &'static str = "int";
+                #[inline]
+                fn encode_key(&self, enc: &mut Encoder) -> Result<()> {
+                    self.encode(enc)
+                }
+            }
+
+            impl<'de> AsunDecodeMapKey<'de> for $ty {
+                #[inline]
+                fn decode_key(dec: &mut Decoder<'de>) -> Result<Self> {
+                    <$ty as AsunDecode<'de>>::decode(dec)
+                }
+            }
+        )+
+    };
+}
+
+int_map_key!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+impl<K: AsunMapKey, V: AsunEncode, S> AsunEncode for HashMap<K, V, S> {
+    #[inline]
+    fn encode(&self, enc: &mut Encoder) -> Result<()> {
+        enc.encode_map(self.len(), self.iter())
+    }
+}
+
+impl<K: AsunMapKey, V: AsunEncode> AsunEncode for BTreeMap<K, V> {
+    #[inline]
+    fn encode(&self, enc: &mut Encoder) -> Result<()> {
+        enc.encode_map(self.len(), self.iter())
+    }
+}
+
+impl<'de, K, V, S> AsunDecode<'de> for HashMap<K, V, S>
+where
+    K: AsunDecodeMapKey<'de> + Eq + Hash,
+    V: AsunDecode<'de>,
+    S: BuildHasher + Default,
+{
+    fn decode(dec: &mut Decoder<'de>) -> Result<Self> {
+        let mut map = HashMap::with_hasher(S::default());
+        dec.decode_map(|k, v| match map.insert(k, v) {
+            None => Ok(()),
+            Some(_) => Err(Error::DuplicateKey),
+        })?;
+        Ok(map)
+    }
+}
+
+impl<'de, K, V> AsunDecode<'de> for BTreeMap<K, V>
+where
+    K: AsunDecodeMapKey<'de> + Ord,
+    V: AsunDecode<'de>,
+{
+    fn decode(dec: &mut Decoder<'de>) -> Result<Self> {
+        let mut map = BTreeMap::new();
+        dec.decode_map(|k, v| match map.insert(k, v) {
+            None => Ok(()),
+            Some(_) => Err(Error::DuplicateKey),
+        })?;
+        Ok(map)
+    }
+}
+
+impl<K: AsunMapKey + AsunEncodeBinary, V: AsunEncodeBinary, S> AsunEncodeBinary
+    for HashMap<K, V, S>
+{
+    #[inline]
+    fn encode_binary(&self, enc: &mut BinaryEncoder) -> Result<()> {
+        enc.write_map(self.len(), self.iter())
+    }
+}
+
+impl<K: AsunMapKey + AsunEncodeBinary, V: AsunEncodeBinary> AsunEncodeBinary for BTreeMap<K, V> {
+    #[inline]
+    fn encode_binary(&self, enc: &mut BinaryEncoder) -> Result<()> {
+        enc.write_map(self.len(), self.iter())
+    }
+}
+
+impl<'de, K, V, S> AsunDecodeBinary<'de> for HashMap<K, V, S>
+where
+    K: AsunMapKey + AsunDecodeBinary<'de> + Eq + Hash,
+    V: AsunDecodeBinary<'de>,
+    S: BuildHasher + Default,
+{
+    fn decode_binary(dec: &mut BinaryDecoder<'de>) -> Result<Self> {
+        let mut map = HashMap::with_hasher(S::default());
+        dec.read_map(|k, v| match map.insert(k, v) {
+            None => Ok(()),
+            Some(_) => Err(Error::DuplicateKey),
+        })?;
+        Ok(map)
+    }
+}
+
+impl<'de, K, V> AsunDecodeBinary<'de> for BTreeMap<K, V>
+where
+    K: AsunMapKey + AsunDecodeBinary<'de> + Ord,
+    V: AsunDecodeBinary<'de>,
+{
+    fn decode_binary(dec: &mut BinaryDecoder<'de>) -> Result<Self> {
+        let mut map = BTreeMap::new();
+        dec.read_map(|k, v| match map.insert(k, v) {
+            None => Ok(()),
+            Some(_) => Err(Error::DuplicateKey),
+        })?;
+        Ok(map)
+    }
 }

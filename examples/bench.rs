@@ -1,5 +1,6 @@
 use asun::{AsunDecode, AsunEncode, decode, decode_binary, encode, encode_binary, encode_typed};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::time::Instant;
 
 // ===========================================================================
@@ -16,6 +17,25 @@ struct User {
     active: bool,
     role: String,
     city: String,
+}
+
+/// `User` with zero-copy string fields: `Cow` borrows from the input and only
+/// allocates for a quoted string with escapes (serde needs `#[serde(borrow)]`
+/// for the same behaviour).
+#[derive(Debug, Serialize, Deserialize, AsunEncode, AsunDecode, PartialEq)]
+struct UserRef<'a> {
+    id: i64,
+    #[serde(borrow)]
+    name: Cow<'a, str>,
+    #[serde(borrow)]
+    email: Cow<'a, str>,
+    age: i64,
+    score: f64,
+    active: bool,
+    #[serde(borrow)]
+    role: Cow<'a, str>,
+    #[serde(borrow)]
+    city: Cow<'a, str>,
 }
 
 // ===========================================================================
@@ -350,6 +370,85 @@ fn bench_flat(count: usize, iterations: u32) -> BenchResult {
         asun_bytes: asun_str.len(),
         bin_bytes: bin_buf.len(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Zero-copy decode benchmark
+// ---------------------------------------------------------------------------
+
+/// Average milliseconds per call of `f` over `iterations` runs.
+fn time_ms(iterations: u32, mut f: impl FnMut()) -> f64 {
+    let start = Instant::now();
+    for _ in 0..iterations {
+        f();
+    }
+    start.elapsed().as_secs_f64() * 1000.0 / iterations as f64
+}
+
+/// Decode the same flat-user payload into owned `String` fields and into
+/// borrowed `Cow<str>` fields, for JSON, ASUN text and ASUN binary.
+fn bench_zero_copy(count: usize, iterations: u32) {
+    let users = generate_users(count);
+    let json_str = serde_json::to_string(&users).unwrap();
+    let asun_str = encode(&users).unwrap();
+    let bin_buf = encode_binary(&users).unwrap();
+
+    let json_own = time_ms(iterations, || {
+        let _: Vec<User> = serde_json::from_str(&json_str).unwrap();
+    });
+    let json_cow = time_ms(iterations, || {
+        let _: Vec<UserRef> = serde_json::from_str(&json_str).unwrap();
+    });
+    let asun_own = time_ms(iterations, || {
+        let _: Vec<User> = decode(&asun_str).unwrap();
+    });
+    let asun_cow = time_ms(iterations, || {
+        let _: Vec<UserRef> = decode(&asun_str).unwrap();
+    });
+    let bin_own = time_ms(iterations, || {
+        let _: Vec<User> = decode_binary(&bin_buf).unwrap();
+    });
+    let bin_cow = time_ms(iterations, || {
+        let _: Vec<UserRef> = decode_binary(&bin_buf).unwrap();
+    });
+
+    // Verify: same values, and every string field really is borrowed.
+    let decoded: Vec<UserRef> = decode(&asun_str).unwrap();
+    let borrowed = |c: &Cow<str>| matches!(c, Cow::Borrowed(_));
+    for (u, r) in users.iter().zip(&decoded) {
+        assert_eq!((u.name.as_str(), u.email.as_str()), (&*r.name, &*r.email));
+        assert_eq!((u.role.as_str(), u.city.as_str()), (&*r.role, &*r.city));
+        assert!(borrowed(&r.name) && borrowed(&r.email) && borrowed(&r.role) && borrowed(&r.city));
+    }
+    assert_eq!(
+        encode(&decoded).unwrap(),
+        asun_str,
+        "zero-copy re-encode mismatch"
+    );
+
+    println!("  Flat struct × {count} ({iterations} iters, decode only, ms/iter)");
+    println!(
+        "    String:    JSON {:>7.3} | ASUN {:>7.3} ({}) | BIN {:>7.3} ({})",
+        json_own,
+        asun_own,
+        format_ratio(json_own, asun_own),
+        bin_own,
+        format_ratio(json_own, bin_own),
+    );
+    println!(
+        "    Cow<str>:  JSON {:>7.3} | ASUN {:>7.3} ({}) | BIN {:>7.3} ({})",
+        json_cow,
+        asun_cow,
+        format_ratio(json_cow, asun_cow),
+        bin_cow,
+        format_ratio(json_cow, bin_cow),
+    );
+    println!(
+        "    Cow speedup over String: JSON {:.2}x | ASUN {:.2}x | BIN {:.2}x",
+        json_own / json_cow,
+        asun_own / asun_cow,
+        bin_own / bin_cow,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,6 +1420,16 @@ fn main() {
             json_ns / bin_ns,
             json_ns / asun_ns
         );
+    }
+
+    // =====================================================================
+    // Section 10: Zero-copy decode (Cow<str>)
+    // =====================================================================
+    println!("\n┌──────────────────────────────────────────────────────────────┐");
+    println!("│  Section 10: Zero-Copy Decode (String vs Cow<str>)           │");
+    println!("└──────────────────────────────────────────────────────────────┘");
+    for (count, iters) in [(1000usize, 50u32), (5000, 10)] {
+        bench_zero_copy(count, iters);
     }
 
     println!("\n╔══════════════════════════════════════════════════════════════╗");

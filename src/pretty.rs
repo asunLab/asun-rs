@@ -57,9 +57,8 @@ pub fn pretty_format(src: &[u8]) -> String {
 }
 
 /// Length of the token at `i` whose bytes are never structural and must be
-/// copied verbatim: a quoted string, a `\x` escape inside a plain string, or a
-/// comment. `0` when `src[i]` starts none of them. Unterminated tokens run to
-/// the end of the input.
+/// copied verbatim: a quoted string or a comment. `0` when `src[i]` starts
+/// none of them. Unterminated tokens run to the end of the input.
 #[inline]
 fn atom_len(src: &[u8], i: usize) -> usize {
     let n = src.len();
@@ -75,7 +74,6 @@ fn atom_len(src: &[u8], i: usize) -> usize {
             }
             n - i
         }
-        b'\\' => (n - i).min(2),
         b'/' if i + 1 < n && src[i + 1] == b'*' => {
             let mut j = i + 2;
             while j + 1 < n {
@@ -263,8 +261,8 @@ impl<'a> PrettyFmt<'a> {
 
         let mut first = true;
         while self.pos < close {
-            // The comma is consumed only between slots: a leading `,` is the
-            // end of an empty (null) first slot and must be kept.
+            // The comma is consumed only between slots, so malformed input with
+            // a leading `,` (a blank position) is kept as is.
             if !first && self.src[self.pos] == b',' {
                 self.pos += 1;
             }
